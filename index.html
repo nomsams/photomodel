@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-accent="orange">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhotoModel 3D — build 3D models from photos</title>
+<meta name="description" content="Build 3D models in your browser from photos: place photo cameras, draw and triangulate points, solve camera poses, overlay photos on the model and export OBJ / GLB / STL.">
+<meta name="theme-color" content="#0e1014">
+<meta property="og:title" content="PhotoModel 3D">
+<meta property="og:description" content="Build 3D models from photos, right in the browser.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ffb547'/%3E%3Cstop offset='1' stop-color='%23ff6a3d'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='url(%23g)'/%3E%3Cpath d='M16 2v28M4 9l12 7 12-7' stroke='%23fff' stroke-opacity='.55' stroke-width='1.6' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<!-- ============ ICON SPRITE ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="var(--accent-hi)"/><stop offset="1" stop-color="var(--accent)"/></linearGradient>
+  </defs>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.5v15"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7L4.5 11.5 9 16"/><path d="M5 11.5h9.5a5 5 0 0 1 0 10H11"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 7l4.5 4.5L15 16"/><path d="M19 11.5H9.5a5 5 0 0 0 0 10H13"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.1-2.4 3.7"/><path d="M12 17.2v.1"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5M12 11.5v6M9 14.5h6"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5.5 3.5h10l3 3v12a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2z"/><path d="M8 3.5v5h7v-5M8 20.5v-6h8v6"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4.5 15.5v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 14.5v-11M7.5 8L12 3.5 16.5 8"/><path d="M4.5 15.5v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-5-5-9 8.5"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><circle cx="6" cy="14" r="1.2"/><circle cx="10" cy="9" r="1.2"/><circle cx="14" cy="13" r="1.2"/><circle cx="18" cy="8" r="1.2"/><circle cx="12" cy="18" r="1.2"/><circle cx="17" cy="17" r="1.2"/><circle cx="7" cy="6" r="1.2"/></symbol>
+  <symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12L4 7.5M12 12v9"/></symbol>
+  <symbol id="i-select" viewBox="0 0 24 24"><path d="M5.5 4l12.5 7.2-5.3 1.4 3.2 6-2.4 1.2-3.1-6-3.9 3.8z"/></symbol>
+  <symbol id="i-point" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v3.5M12 17.5V21M3 12h3.5M17.5 12H21"/></symbol>
+  <symbol id="i-line" viewBox="0 0 24 24"><path d="M6.5 17.5l11-11"/><circle cx="5.5" cy="18.5" r="2"/><circle cx="18.5" cy="5.5" r="2"/></symbol>
+  <symbol id="i-face" viewBox="0 0 24 24"><path d="M4.5 18L8 5.5l11.5 3-3 11z"/><path d="M8 5.5l8.5 14" opacity=".45"/></symbol>
+  <symbol id="i-tri" viewBox="0 0 24 24"><path d="M3 20L12 10M21 20L12 10"/><circle cx="12" cy="9" r="2.6"/><path d="M3 20h2.5M18.5 20H21" opacity=".6"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3L9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/></symbol>
+  <symbol id="i-scale" viewBox="0 0 24 24"><path d="M4 9V4h5M20 15v5h-5M4 4l6.5 6.5M20 20l-6.5-6.5"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M9.9 5.8A9.7 9.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.9 3.6M6.4 7.3A16 16 0 0 0 2.5 12S6 18.5 12 18.5a9 9 0 0 0 4.1-1"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4.5 8.5a2 2 0 0 1 2-2h2l1.5-2h4l1.5 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.3"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l1 13h9l1-13"/><path d="M10 10.5v6M14 10.5v6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+  <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 8.5V4h4.5M15.5 4H20v4.5M20 15.5V20h-4.5M8.5 20H4v-4.5"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+  <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M5.5 4.5h4v7a2.5 2.5 0 0 0 5 0v-7h4v7a6.5 6.5 0 0 1-13 0z"/><path d="M5.5 8.5h4M14.5 8.5h4"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2"/><path d="M3.5 9.2h17M3.5 14.8h17M9.2 3.5v17M14.8 3.5v17"/></symbol>
+  <symbol id="i-align" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="5"/><path d="M14.5 9.5l-5 5"/></symbol>
+  <symbol id="i-solve" viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 4l8.5 4.5L12 13 3.5 8.5z"/><path d="M3.5 12.5L12 17l8.5-4.5M3.5 16.5L12 21l8.5-4.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7.5 14h9"/></symbol>
+</svg>
+
+<div id="app">
+  <!-- ============ TOP BAR ============ -->
+  <header id="topbar">
+    <button class="icon-btn ghost" data-action="toggleLeft" title="Photos &amp; objects panel"><svg class="ic"><use href="#i-menu"/></svg></button>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="url(#brandGrad)"/><path d="M16 2v28M4 9l12 7 12-7" stroke="#fff" stroke-opacity=".5" stroke-width="1.6" fill="none"/></svg>
+      <span class="brand-text">PhotoModel<b>3D</b></span>
+    </div>
+    <div class="project">
+      <input id="projectName" value="Untitled project" spellcheck="false" title="Project name">
+      <span id="dirtyDot" class="dirty-dot hidden" title="Unsaved changes (Ctrl+S to save)"></span>
+    </div>
+    <nav class="menu">
+      <button class="ghost" data-action="newProject" title="New project"><svg class="ic"><use href="#i-new"/></svg><span>New</span></button>
+      <button class="ghost" data-action="open" title="Open project (Ctrl+O)"><svg class="ic"><use href="#i-open"/></svg><span>Open</span></button>
+      <button class="ghost" data-action="save" title="Save project with photos (Ctrl+S)"><svg class="ic"><use href="#i-save"/></svg><span>Save</span></button>
+      <span class="sep"></span>
+      <div class="dropdown">
+        <button class="ghost" data-action="menu" data-arg="importMenu"><svg class="ic"><use href="#i-import"/></svg><span>Import</span><svg class="ic chev"><use href="#i-down"/></svg></button>
+        <div class="dropdown-menu" id="importMenu">
+          <button data-action="importImages"><svg class="ic"><use href="#i-image"/></svg>Photos…<kbd>I</kbd></button>
+          <button data-action="importCloud"><svg class="ic"><use href="#i-cloud"/></svg>Point cloud (.ply .xyz .txt .csv .pts)…</button>
+          <button data-action="importObj"><svg class="ic"><use href="#i-cube"/></svg>OBJ model…</button>
+          <div class="menu-sep"></div>
+          <button data-action="demo"><svg class="ic"><use href="#i-sparkle"/></svg>Load demo project</button>
+        </div>
+      </div>
+      <div class="dropdown">
+        <button class="ghost" data-action="menu" data-arg="exportMenu"><svg class="ic"><use href="#i-export"/></svg><span>Export</span><svg class="ic chev"><use href="#i-down"/></svg></button>
+        <div class="dropdown-menu" id="exportMenu">
+          <button data-action="exportAs" data-arg="obj"><svg class="ic"><use href="#i-cube"/></svg>Wavefront OBJ (.obj)</button>
+          <button data-action="exportAs" data-arg="glb"><svg class="ic"><use href="#i-layers"/></svg>glTF binary (.glb)</button>
+          <button data-action="exportAs" data-arg="stl"><svg class="ic"><use href="#i-cube"/></svg>STL for 3D printing (.stl)</button>
+          <button data-action="exportAs" data-arg="ply"><svg class="ic"><use href="#i-cloud"/></svg>Points as PLY (.ply)</button>
+          <button data-action="exportAs" data-arg="cameras"><svg class="ic"><use href="#i-camera"/></svg>Camera poses (.json)</button>
+          <button data-action="exportAs" data-arg="png"><svg class="ic"><use href="#i-image"/></svg>Screenshot (.png)</button>
+        </div>
+      </div>
+    </nav>
+    <div class="spacer"></div>
+    <button class="palette-btn" data-action="palette" title="Command palette (Ctrl+K)"><svg class="ic"><use href="#i-search"/></svg><span>Search commands</span><kbd>Ctrl K</kbd></button>
+    <button class="icon-btn ghost" data-action="undo" id="btnUndo" title="Undo (Ctrl+Z)"><svg class="ic"><use href="#i-undo"/></svg></button>
+    <button class="icon-btn ghost" data-action="redo" id="btnRedo" title="Redo (Ctrl+Y)"><svg class="ic"><use href="#i-redo"/></svg></button>
+    <button class="icon-btn ghost" data-action="help" title="Help &amp; shortcuts (?)"><svg class="ic"><use href="#i-help"/></svg></button>
+    <button class="icon-btn ghost" data-action="settings" title="Settings"><svg class="ic"><use href="#i-settings"/></svg></button>
+    <button class="icon-btn ghost" data-action="toggleRight" title="Properties panel"><svg class="ic"><use href="#i-panel"/></svg></button>
+  </header>
+
+  <!-- ============ WORKSPACE ============ -->
+  <main id="workspace">
+    <aside id="leftPanel" class="panel">
+      <section class="panel-section" data-section="photos">
+        <div class="section-head">
+          <h3 class="collapser"><svg class="ic chev"><use href="#i-down"/></svg>Photos <span class="count" id="imgCount">0</span></h3>
+          <div class="head-actions">
+            <button class="small" data-action="importImages" title="Import photos (I)"><svg class="ic"><use href="#i-import"/></svg>Add</button>
+            <button class="small" data-action="arrange" title="Place cameras in a ring around the object">Arrange</button>
+          </div>
+        </div>
+        <div class="section-body"><div id="imageList" class="list"></div></div>
+      </section>
+      <section class="panel-section" data-section="objects">
+        <div class="section-head">
+          <h3 class="collapser"><svg class="ic chev"><use href="#i-down"/></svg>Objects <span class="count" id="objCount">0</span></h3>
+          <div class="head-actions">
+            <button class="small" data-action="groupSelection" title="Combine the selected faces / lines into an object (Ctrl+G)">Group selection</button>
+          </div>
+        </div>
+        <div class="section-body"><div id="objectList" class="list"></div></div>
+      </section>
+      <section class="panel-section" data-section="cloud">
+        <div class="section-head"><h3 class="collapser"><svg class="ic chev"><use href="#i-down"/></svg>Point cloud</h3></div>
+        <div class="section-body"><div id="cloudInfo"></div></div>
+      </section>
+    </aside>
+
+    <section id="viewWrap">
+      <div id="overlayWrap" class="hidden"><img id="overlay" alt=""></div>
+      <div id="viewport"></div>
+      <svg id="pinLayer" class="hidden"></svg>
+      <canvas id="loupe" class="hidden"></canvas>
+      <div id="boxSel" class="hidden"></div>
+
+      <div id="toolbar" class="floating">
+        <button data-tool="select" title="Select &amp; transform (V)"><svg class="ic"><use href="#i-select"/></svg></button>
+        <button data-tool="point" title="Point (P)"><svg class="ic"><use href="#i-point"/></svg></button>
+        <button data-tool="line" title="Line (L)"><svg class="ic"><use href="#i-line"/></svg></button>
+        <button data-tool="face" title="Face (F)"><svg class="ic"><use href="#i-face"/></svg></button>
+        <div class="tb-sep"></div>
+        <button data-tool="triangulate" title="Triangulate from photos (T)"><svg class="ic"><use href="#i-tri"/></svg></button>
+        <button data-tool="match" title="Pin points in photos (K)"><svg class="ic"><use href="#i-pin"/></svg></button>
+        <div id="gizmoModes">
+          <div class="tb-sep"></div>
+          <button data-gizmo="translate" title="Move gizmo (W)"><svg class="ic"><use href="#i-move"/></svg></button>
+          <button data-gizmo="rotate" title="Rotate gizmo (E)"><svg class="ic"><use href="#i-rotate"/></svg></button>
+          <button data-gizmo="scale" title="Scale gizmo (R)"><svg class="ic"><use href="#i-scale"/></svg></button>
+        </div>
+      </div>
+
+      <div id="hud" class="floating">
+        <label class="hud-field" title="Plane that new points are placed on">
+          <svg class="ic"><use href="#i-grid"/></svg>
+          <select id="hudPlane">
+            <option value="XZ">Ground XZ</option>
+            <option value="XY">Front XY</option>
+            <option value="YZ">Side YZ</option>
+          </select>
+        </label>
+        <input id="hudOffset" type="number" step="0.1" title="Work plane offset (distance along its normal)">
+        <button class="small" data-action="planeToSelection" title="Move work plane through the selected point">Through sel.</button>
+        <button class="toggle small" id="hudSnap" data-action="toggleSnap" title="Snap to grid (S) — hold Alt to bypass"><svg class="ic"><use href="#i-magnet"/></svg>Snap</button>
+        <span class="sep"></span>
+        <button class="small" data-action="frame" title="Frame all / selection (Home)"><svg class="ic"><use href="#i-frame"/></svg>Frame</button>
+        <button class="small" data-action="nearest" title="Look through the photo nearest the current view (N)"><svg class="ic"><use href="#i-camera"/></svg>Nearest photo</button>
+      </div>
+
+      <svg id="axisGizmo" viewBox="-46 -46 92 92" aria-label="View orientation"></svg>
+
+      <div id="camBanner" class="floating hidden">
+        <div class="cb-row">
+          <button class="icon-btn ghost" data-action="prevImage" title="Previous photo ([)"><svg class="ic"><use href="#i-left"/></svg></button>
+          <div class="cb-title"><span id="cbName"></span><span id="cbIndex" class="muted"></span></div>
+          <button class="icon-btn ghost" data-action="nextImage" title="Next photo (])"><svg class="ic"><use href="#i-right"/></svg></button>
+          <span id="cbPins" class="chip" title="Pins in this photo and the reprojection error"></span>
+          <button id="cbSolve" class="small" data-action="solveCamera" title="Solve this camera's position from its pins (needs 4+)"><svg class="ic"><use href="#i-solve"/></svg>Solve</button>
+          <button id="cbAlign" class="toggle small" data-action="toggleAlign" title="Align mode (A): orbit / pan / zoom moves THIS camera so the photo lines up with the model"><svg class="ic"><use href="#i-align"/></svg>Align</button>
+          <button id="cbOverlay" class="toggle small" data-action="toggleOverlay" title="Show / hide the photo (O)"><svg class="ic"><use href="#i-image"/></svg>Photo</button>
+          <button class="small" data-action="exitCamera" title="Back to free view (Esc)"><svg class="ic"><use href="#i-close"/></svg>Exit</button>
+        </div>
+        <div class="cb-row cb-sliders">
+          <label class="cb-ctl" title="Photo overlay opacity">Opacity <input type="range" id="cbOpacity" min="0" max="1" step="0.01"></label>
+          <label class="cb-ctl" title="Vertical field of view of this photo">FOV <input type="range" id="cbFov" min="5" max="120" step="0.1"><span id="cbFovVal" class="mono"></span></label>
+          <label class="cb-ctl" title="Camera roll">Roll <input type="range" id="cbRoll" min="-180" max="180" step="0.1"></label>
+          <button class="small ghost" id="cbZoom" data-action="resetPhotoZoom" title="Photo zoom — wheel to zoom, right/middle-drag to pan, click to reset (Home)">100%</button>
+        </div>
+      </div>
+
+      <div id="emptyState" class="hidden">
+        <div class="card">
+          <div class="hero-icon"><svg class="ic"><use href="#i-cube"/></svg></div>
+          <h2>Build a 3D model from photos</h2>
+          <p class="muted">Place your photos as cameras around the object, draw and triangulate its shape, and check it against every photo.</p>
+          <ol class="steps">
+            <li><b>Import</b> photos of one object from several sides.</li>
+            <li><b>Position</b> the cameras: Arrange, gizmo, Align or Solve from pins.</li>
+            <li><b>Model</b> with points, lines and faces — or triangulate from two photos.</li>
+            <li><b>Check</b> any photo overlaid on the model, then <b>export</b>.</li>
+          </ol>
+          <div class="row">
+            <button class="primary" data-action="importImages"><svg class="ic"><use href="#i-import"/></svg>Import photos</button>
+            <button data-action="demo"><svg class="ic"><use href="#i-sparkle"/></svg>Try the demo</button>
+            <button class="ghost" data-action="help">How it works</button>
+          </div>
+          <p class="muted small">Tip: drag &amp; drop photos, a saved project or a point cloud anywhere.</p>
+        </div>
+      </div>
+
+      <div id="dropZone" class="hidden"><div><svg class="ic"><use href="#i-import"/></svg>Drop photos, a project (.json), a point cloud or an OBJ</div></div>
+    </section>
+
+    <aside id="rightPanel" class="panel">
+      <div id="props"></div>
+    </aside>
+  </main>
+
+  <!-- ============ STATUS BAR ============ -->
+  <footer id="statusbar">
+    <span id="stTool" class="chip accent"></span>
+    <span id="stHint"></span>
+    <span class="spacer"></span>
+    <span id="stCoords" class="mono"></span>
+    <span id="stCounts"></span>
+    <span id="stSaved" class="muted"></span>
+  </footer>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toasts"></div>
+<div id="tooltip" class="hidden"></div>
+<div id="ctxMenu" class="dropdown-menu ctx hidden"></div>
+<div id="progress" class="hidden"><div class="progress-card"><div id="progressText">Working…</div><div class="bar"><div id="progressBar"></div></div></div></div>
+
+<input type="file" id="fileImages" accept="image/*" multiple hidden>
+<input type="file" id="fileProject" accept=".json,application/json" hidden>
+<input type="file" id="fileCloud" accept=".ply,.xyz,.txt,.csv,.pts" hidden>
+<input type="file" id="fileObj" accept=".obj" hidden>
+
+<div id="bootMsg"><div class="boot-card"><svg class="logo spin" viewBox="0 0 32 32"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="url(#brandGrad)"/></svg><div>Loading 3D engine…</div></div></div>
+
+<script type="module">
+  // Load three.js (ES modules), expose it globally, then load the app's classic scripts.
+  // Classic scripts keep the app working when index.html is opened straight from disk (file://).
+  try {
+    const THREE = await import('three');
+    const [{ OrbitControls }, { TransformControls }, { LineSegments2 }, { LineSegmentsGeometry }, { LineMaterial }, { GLTFExporter }, { PLYLoader }] =
+      await Promise.all([
+        import('three/addons/controls/OrbitControls.js'),
+        import('three/addons/controls/TransformControls.js'),
+        import('three/addons/lines/LineSegments2.js'),
+        import('three/addons/lines/LineSegmentsGeometry.js'),
+        import('three/addons/lines/LineMaterial.js'),
+        import('three/addons/exporters/GLTFExporter.js'),
+        import('three/addons/loaders/PLYLoader.js'),
+      ]);
+    window.THREE = Object.assign({}, THREE, { OrbitControls, TransformControls, LineSegments2, LineSegmentsGeometry, LineMaterial, GLTFExporter, PLYLoader });
+    const load = src => new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
+      document.body.appendChild(s);
+    });
+    for (const src of ['core', 'solve', 'viewport', 'photoview', 'tools', 'io', 'demo', 'ui']) await load('js/' + src + '.js');
+    await window.P3.ui.init();
+    document.getElementById('bootMsg').remove();
+  } catch (err) {
+    console.error(err);
+    document.querySelector('#bootMsg .boot-card').innerHTML =
+      '<b>Could not start PhotoModel 3D.</b><div class="muted">' + String(err.message || err).replace(/</g, '&lt;') +
+      '</div><small class="muted">three.js is loaded from cdn.jsdelivr.net — an internet connection is needed on first load.</small>';
+  }
+</script>
+</body>
+</html>
