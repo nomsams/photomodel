@@ -228,6 +228,30 @@ function bundle(cams0, pts0, obs, { solveFov = false, iters = 80, scale = 1, onP
   const P = nC * k + vids.length * 3;
   let cams = cams0.slice();
   let pts = new Map([...pts0].map(([v, p]) => [v, p.clone()]));
+  obs = obs.map(o => ({ ...o }));
+  // a line's two ends in one photo may be matched either way round: re-decide every iteration
+  const pairMap = new Map();
+  obs.forEach((o, i) => {
+    const fo = o.pv != null && idx.featOf.get(o.pv);
+    if (!fo || fo.f.kind !== 'line') return;
+    const k = o.ci + ':' + fo.f.id;
+    if (!pairMap.has(k)) pairMap.set(k, []);
+    pairMap.get(k).push(i);
+  });
+  const pairs = [...pairMap.values()].filter(p => p.length === 2);
+  const rematch = () => {
+    let changed = false;
+    for (const [i1, i2] of pairs) {
+      const o1 = obs[i1], o2 = obs[i2], c = cams[o1.ci];
+      const X1 = pts.get(o1.v), X2 = pts.get(o2.v);
+      if (!X1 || !X2) continue;
+      const q1 = projectPx(c, X1), q2 = projectPx(c, X2);
+      if (!q1 || !q2) continue;
+      const e = (q, o) => (q[0] - o.u) ** 2 + (q[1] - o.vpx) ** 2;
+      if (e(q2, o1) + e(q1, o2) < e(q1, o1) + e(q2, o2) - 1e-9) { const t = o1.v; o1.v = o2.v; o2.v = t; changed = true; }
+    }
+    return changed;
+  };
   const resid = (cs, ps) => {
     const r = new Array(obs.length * 2);
     obs.forEach((o, i) => {
@@ -236,9 +260,11 @@ function bundle(cams0, pts0, obs, { solveFov = false, iters = 80, scale = 1, onP
     });
     return r;
   };
+  rematch();
   let r = resid(cams, pts), f = cost(r), lambda = 1e-3;
   const eps = 1e-6;
   for (let it = 0; it < iters; it++) {
+    if (pairs.length && rematch()) { r = resid(cams, pts); f = cost(r); }
     const A = Array.from({ length: P }, () => new Float64Array(P));
     const g = new Float64Array(P);
     obs.forEach((o, i) => {
@@ -285,7 +311,7 @@ function bundle(cams0, pts0, obs, { solveFov = false, iters = 80, scale = 1, onP
     if (onProgress) onProgress(it / iters);
     if (!improved || done || f < 1e-12) break;
   }
-  return { cams, pts, cost: f, rms: Math.sqrt(f / Math.max(1, obs.length)) };
+  return { cams, pts, obs, cost: f, rms: Math.sqrt(f / Math.max(1, obs.length)) };
 }
 solve._bundle = bundle;
 
@@ -467,45 +493,170 @@ function completeAndAdjust(cand, imgs, obsOf, vids, iters, onProgress) {
   }
   const used = imgs.filter(img => cams.has(img));
   const obs = [];
-  used.forEach((img, ci) => obsOf(img).forEach(o => { if (pts.has(o.v)) obs.push({ ci, v: o.v, u: o.u, vpx: o.vpx }); }));
+  used.forEach((img, ci) => obsOf(img).forEach(o => { if (pts.has(o.v)) obs.push({ ci, v: o.v, pv: o.pv, u: o.u, vpx: o.vpx }); }));
   if (used.length < 2 || pts.size < 3) return null;
   const C = [...pts.values()].reduce((a, p) => a.add(p), new T.Vector3()).divideScalar(pts.size);
   const scale = Math.max(1e-3, ...[...pts.values()].map(p => p.distanceTo(C)));
   const res = bundle(used.map(img => cams.get(img)), pts, obs, { iters, scale, onProgress });
-  return { ...res, used, obs, scale };
+  return { ...res, used, scale };
+}
+
+/* ---------- lines can be drawn either way round ----------
+   A line's two ends are matched across photos by continuity through the photo order (photos taken
+   walking around the object turn gradually); any photo the solved shape says is flipped is then fixed. */
+const pinMapOf = img => new Map((img.pins || []).map(p => [p.v, p]));
+function initialLineSwaps(feats, images) {
+  const swap = new Set();
+  for (const f of feats.filter(x => x.kind === 'line')) {
+    let prev = null;
+    for (const img of images) {
+      const m = pinMapOf(img), pa = m.get(f.a), pb = m.get(f.b);
+      if (!pa || !pb) continue;
+      let dx = (pb.x - pa.x) * img.w, dy = (pb.y - pa.y) * img.h;
+      const L = Math.hypot(dx, dy) || 1;
+      dx /= L; dy /= L;
+      if (prev && dx * prev[0] + dy * prev[1] < 0) { swap.add(img.id + ':' + f.id); dx = -dx; dy = -dy; }
+      prev = [dx, dy];
+    }
+  }
+  return swap;
 }
 
 /**
- * Solve all cameras and the feature shape together from the features marked in the photos.
- * Starts from an affine factorisation (both mirror solutions) and from the template shape,
- * completes and bundle-adjusts each start, keeps the best, then puts the result in the object frame.
+ * End-matching that doesn't depend on drawing direction: rough cameras from line midpoints + points
+ * (an affine factorisation, which is the same whichever end was drawn first), then for every photo pick
+ * the matching of the line's two ends that triangulates consistently with a reference photo.
  */
-solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
-  const s = P3.state;
-  const feats = s.features;
-  if (!feats.length) return { error: 'Add features first (Features panel): e.g. a Direction from tail to nose and a Line across the wings.' };
+function geometricLineSwaps(feats, images) {
+  const lines = feats.filter(f => f.kind === 'line');
+  if (!lines.length) return [];
+  const mid = new Map(lines.map(f => [f.id, 'm' + f.id]));
+  const obsMid = img => {
+    const m = pinMapOf(img), out = [];
+    for (const f of feats) {
+      if (f.kind === 'point') { const p = m.get(f.a); if (p) out.push({ v: f.a, u: p.x * img.w, vpx: p.y * img.h }); continue; }
+      const pa = m.get(f.a), pb = m.get(f.b);
+      if (!pa || !pb) continue;
+      if (f.kind === 'line') out.push({ v: mid.get(f.id), u: (pa.x + pb.x) / 2 * img.w, vpx: (pa.y + pb.y) / 2 * img.h });
+      else { out.push({ v: f.a, u: pa.x * img.w, vpx: pa.y * img.h }); out.push({ v: f.b, u: pb.x * img.w, vpx: pb.y * img.h }); }
+    }
+    return out;
+  };
+  const imgs = images.filter(img => obsMid(img).length >= 4);
+  if (imgs.length < 3) return [];
+  const results = [];
+  for (const cand0 of factorInit(imgs, obsMid)) {
+    // sharpen the rough affine cameras with a perspective adjustment on the end-independent data
+    const usedM = imgs.filter(img => cand0.cams.has(img));
+    const obsM = [];
+    usedM.forEach((img, ci) => obsMid(img).forEach(o => { if (cand0.pts.has(o.v)) obsM.push({ ci, v: o.v, u: o.u, vpx: o.vpx }); }));
+    const Cm = [...cand0.pts.values()].reduce((a, p) => a.add(p.clone()), new T.Vector3()).divideScalar(cand0.pts.size);
+    const scM = Math.max(1e-3, ...[...cand0.pts.values()].map(p => p.distanceTo(Cm)));
+    const bm = bundle(usedM.map(img => cand0.cams.get(img)), cand0.pts, obsM, { iters: 60, scale: scM });
+    const cand = { cams: new Map(usedM.map((img, ci) => [img, bm.cams[ci]])), pts: bm.pts };
+    const swap = new Set();
+    for (const f of lines) {
+      const withCam = imgs.filter(img => cand.cams.has(img) && pinMapOf(img).has(f.a) && pinMapOf(img).has(f.b));
+      if (withCam.length < 2) continue;
+      const obs = withCam.map(img => {
+        const c = cand.cams.get(img), m = pinMapOf(img), pa = m.get(f.a), pb = m.get(f.b);
+        const ra = rayFor(c, img, { u: pa.x * img.w, vpx: pa.y * img.h });
+        const rb = rayFor(c, img, { u: pb.x * img.w, vpx: pb.y * img.h });
+        const rm = rayFor(c, img, { u: (pa.x + pb.x) / 2 * img.w, vpx: (pa.y + pb.y) / 2 * img.h });
+        return { img, ra, rb, rm, n: ra.d.clone().cross(rb.d).normalize() };
+      });
+      // 3D line: direction ⟂ every photo's line-plane normal; a point from the midpoint rays
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      obs.forEach(o => { const n = [o.n.x, o.n.y, o.n.z]; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; });
+      const ev = jacobiEigen(A);
+      const d = new T.Vector3(...ev.vectors[2]).normalize();
+      const sol = P3.model.solveRays(obs.map(o => o.rm));
+      if (!sol || !(d.lengthSq() > 0.5)) continue;
+      const p0 = sol.point;
+      const along = r => { // parameter on the 3D line of the point closest to ray r
+        const w0 = r.o.clone().sub(p0), b = r.d.dot(d), den = 1 - b * b;
+        return den < 1e-9 ? 0 : (w0.dot(d) - b * r.d.dot(w0)) / den;
+      };
+      for (const o of obs) if (along(o.ra) > along(o.rb)) swap.add(o.img.id + ':' + f.id);
+    }
+    // alternate: triangulate line ends with these labels → re-fit cameras → re-decide each photo's ends
+    for (let round = 0; round < 4; round++) {
+      const P = new Map();
+      for (const f of feats) {
+        for (const [end, v] of (f.kind === 'point' ? [['a', f.a]] : [['a', f.a], ['b', f.b]])) {
+          const rays = [];
+          for (const img of usedM) {
+            const m = pinMapOf(img);
+            let p = m.get(v);
+            if (f.kind === 'line' && swap.has(img.id + ':' + f.id)) p = m.get(end === 'a' ? f.b : f.a);
+            if (p) rays.push(rayFor(cand.cams.get(img), img, { u: p.x * img.w, vpx: p.y * img.h }));
+          }
+          if (rays.length >= 2) { const sres = P3.model.solveRays(rays); if (sres) P.set(v, sres.point); }
+        }
+      }
+      if (P.size < 4) break;
+      const Cp = [...P.values()].reduce((a, p) => a.add(p.clone()), new T.Vector3()).divideScalar(P.size);
+      const scP = Math.max(1e-3, ...[...P.values()].map(p => p.distanceTo(Cp)));
+      let changed = false;
+      for (const img of usedM) {
+        const m = pinMapOf(img);
+        const ob = [];
+        for (const f of feats) {
+          const sw = f.kind === 'line' && swap.has(img.id + ':' + f.id);
+          for (const [v, w] of (f.kind === 'point' ? [[f.a, f.a]] : [[f.a, sw ? f.b : f.a], [f.b, sw ? f.a : f.b]])) {
+            const p = m.get(w);
+            if (p && P.has(v)) ob.push({ X: P.get(v), u: p.x * img.w, v: p.y * img.h });
+          }
+        }
+        if (ob.length >= 4) cand.cams.set(img, lm(cand.cams.get(img), ob, { iters: 40, scale: scP }).cam);
+        const c = cand.cams.get(img);
+        for (const f of lines) {
+          const pa = m.get(f.a), pb = m.get(f.b), A = P.get(f.a), B = P.get(f.b);
+          if (!pa || !pb || !A || !B) continue;
+          const qa = projectPx(c, A), qb = projectPx(c, B);
+          if (!qa || !qb) continue;
+          const e = (q, p) => Math.hypot(q[0] - p.x * img.w, q[1] - p.y * img.h);
+          const key = img.id + ':' + f.id, want = e(qa, pb) + e(qb, pa) < e(qa, pa) + e(qb, pb);
+          if (want !== swap.has(key)) { if (want) swap.add(key); else swap.delete(key); changed = true; }
+        }
+      }
+      if (!changed) break;
+    }
+    results.push(swap);
+  }
+  return results;
+}
+solve._internals = { geometricLineSwaps: (...a) => geometricLineSwaps(...a), initialLineSwaps: (...a) => initialLineSwaps(...a), factorInit: (...a) => factorInit(...a), solveOnce: (...a) => solveOnce(...a) };
+
+function solveOnce(feats, images, swap, { quick = false, onProgress, drop = null } = {}) {
   const fv = new Set();
   feats.forEach(f => { fv.add(f.a); if (f.kind !== 'point') fv.add(f.b); });
   const obsCache = new Map();
   const obsOf = img => {
-    if (!obsCache.has(img)) obsCache.set(img, (img.pins || []).filter(p => fv.has(p.v)).map(p => ({ v: p.v, u: p.x * img.w, vpx: p.y * img.h })));
+    if (!obsCache.has(img)) {
+      obsCache.set(img, (img.pins || []).filter(p => fv.has(p.v) && !(drop && idx.featOf.get(p.v) && drop.has(img.id + ':' + idx.featOf.get(p.v).f.id))).map(p => {
+        let v = p.v;
+        const fo = idx.featOf.get(v);
+        if (fo && fo.f.kind === 'line' && swap.has(img.id + ':' + fo.f.id)) v = fo.end === 'a' ? fo.f.b : fo.f.a;
+        return { v, pv: p.v, u: p.x * img.w, vpx: p.y * img.h };
+      }));
+    }
     return obsCache.get(img);
   };
-  const imgs = s.images.filter(img => obsOf(img).length >= 4);
-  const skipped = s.images.filter(img => { const n = obsOf(img).length; return n > 0 && n < 4; }).map(i => i.name);
-  if (imgs.length < 2) return { error: `Need at least 2 photos with 4+ marked feature points each (e.g. a direction + a line). Now: ${imgs.length}.` };
+  const imgs = images.filter(img => obsOf(img).length >= 4);
+  const skipped = images.filter(img => { const n = obsOf(img).length; return n > 0 && n < 4; }).map(i => i.name);
+  if (imgs.length < 2) return { error: `Mark at least 2 photos with 2 lines (or 4+ points) each — now ${imgs.length} photo(s) are ready.` };
   const seen = new Map();
   imgs.forEach(img => obsOf(img).forEach(o => seen.set(o.v, (seen.get(o.v) || 0) + 1)));
   const vids = [...fv].filter(v => (seen.get(v) || 0) >= 2);
-  if (vids.length < 3) return { error: 'Mark the same features in at least 2 photos (3+ shared points).' };
+  if (vids.length < 3) return { error: 'Mark the same lines / points in at least 2 photos.' };
 
-  // candidate starts
   const cands = factorInit(imgs, obsOf);
   const tpl = new Map(), counts = {};
   for (const f of feats) {
     const i = (counts[f.kind] = (counts[f.kind] || 0) + 1) - 1;
     const t = P3.model.featureTemplate(f.kind, i);
-    (f.kind === 'point' ? [f.a] : [f.a, f.b]).forEach((v, j) => { if (vids.includes(v)) tpl.set(v, f.solved ? P3.model.vpos(v) : t[j]); });
+    (f.kind === 'point' ? [f.a] : [f.a, f.b]).forEach((v, j) => { if (vids.includes(v)) tpl.set(v, t[j]); });
   }
   cands.push({ cams: new Map(), pts: tpl });
   let best = null;
@@ -514,44 +665,178 @@ solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
     if (r && (!best || r.cost < best.cost)) best = r;
   };
   cands.forEach((cand, k) => tryCand(cand, k, cands.length));
-  // Flat layouts (e.g. a fuselage direction + a wingspan) defeat the factorisation start:
-  // if the fit is still poor, also start from template shapes with the first line at different places / widths.
   const firstLine = feats.find(f => f.kind === 'line' && vids.includes(f.a) && vids.includes(f.b));
   if (!quick && (!best || best.rms > 1.5) && firstLine && vids.length <= 6) {
     const variants = [];
-    for (const x of [0, 0.5, 1]) for (const w of [0.2, 0.45, 0.8]) variants.push({ x, w, y: 0 });
+    for (const x of [0, 0.5, 1]) for (const w of [0.2, 0.45, 0.8]) variants.push({ x, w });
     variants.forEach((v, k) => {
       const pts = new Map([...tpl].map(([id, p]) => [id, p.clone()]));
-      pts.set(firstLine.a, new T.Vector3(v.x, v.y, -v.w));
-      pts.set(firstLine.b, new T.Vector3(v.x, v.y, v.w));
+      pts.set(firstLine.a, new T.Vector3(v.x, 0, -v.w));
+      pts.set(firstLine.b, new T.Vector3(v.x, 0, v.w));
       tryCand({ cams: new Map(), pts }, k, variants.length);
     });
   }
-  if (!best) return { error: 'Could not find a consistent solution — check that each feature is marked the same way round in every photo.' };
-  let res = bundle(best.cams, best.pts, best.obs, { iters: 150, scale: best.scale, onProgress: p => onProgress && onProgress((cands.length + p) / (cands.length + 1)) });
-  if (solveFov) res = bundle(res.cams, res.pts, best.obs, { iters: 150, scale: best.scale, solveFov: true });
-  const used = best.used;
+  if (!best) return { error: 'Could not find a consistent placement — check the marks in the photos with the highest error.' };
+  const res = bundle(best.cams, best.pts, best.obs, { iters: 150, scale: best.scale });
+  return { res, used: best.used, obs: res.obs, scale: best.scale, skipped, starts: cands.length };
+}
 
-  // object frame from the reference direction (+X = tail → nose, +Y up)
-  const m = referenceFrame(res.pts, res.cams.map(c => new T.Vector3(0, 1, 0).applyQuaternion(c.q)));
+/** Frame without a direction marker: photos' average "up" → +Y, first line → X, sitting on the grid, sized to the photo ring. */
+function autoFrame(pts, cams) {
+  const P = [...pts.values()];
+  if (!P.length) return null;
+  const C = P.reduce((a, p) => a.add(p), new T.Vector3()).divideScalar(P.length);
+  const Y = cams.reduce((a, c) => a.add(new T.Vector3(0, 1, 0).applyQuaternion(c.q)), new T.Vector3());
+  if (Y.lengthSq() < 1e-12) Y.set(0, 1, 0);
+  Y.normalize();
+  const feats = P3.state.features;
+  const lf = feats.find(f => f.kind !== 'point' && pts.has(f.a) && pts.has(f.b));
+  const X = lf ? pts.get(lf.b).clone().sub(pts.get(lf.a)) : new T.Vector3(1, 0, 0);
+  X.addScaledVector(Y, -X.dot(Y));
+  if (X.lengthSq() < 1e-12) X.set(1, 0, 0).addScaledVector(Y, -Y.x);
+  X.normalize();
+  const Z = X.clone().cross(Y).normalize();
+  const lenF = feats.find(f => f.length > 0 && f.kind !== 'point' && pts.has(f.a) && pts.has(f.b));
+  let k;
+  if (lenF) k = lenF.length / Math.max(1e-9, pts.get(lenF.a).distanceTo(pts.get(lenF.b)));
+  else k = (+P3.settings.ringRadius || 6) / Math.max(1e-9, cams.reduce((a, c) => a + c.pos.distanceTo(C), 0) / cams.length);
+  let m = new T.Matrix4().makeScale(k, k, k).multiply(new T.Matrix4().makeBasis(X, Y, Z).transpose()).multiply(new T.Matrix4().makeTranslation(-C.x, -C.y, -C.z));
+  const minY = Math.min(...P.map(p => p.clone().applyMatrix4(m).y));
+  m = new T.Matrix4().makeTranslation(0, -minY, 0).multiply(m);
+  return m;
+}
+
+/**
+ * Place every photo (and build the marked shape) from the lines / points marked in the photos.
+ * Affine-factorisation + template starts, joint bundle adjustment, automatic line-orientation fixing,
+ * then the result is put in a tidy frame (direction marker → +X, otherwise upright on the grid).
+ */
+solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
+  const s = P3.state;
+  const feats = s.features;
+  if (!feats.length) return { error: 'Add markers first (lines and points to draw in each photo).' };
+  P3.reindex();
+  // try several end-matchings (geometric ones from both mirror solutions, plus photo-order continuity); keep the best fit
+  const seenSets = new Set();
+  const swapSets = [...geometricLineSwaps(feats, s.images), new Set(), initialLineSwaps(feats, s.images)].filter(sw => { const k = [...sw].sort().join(','); if (seenSets.has(k)) return false; seenSets.add(k); return true; });
+  // Relabel loop: flip any photo's line that fits the current solution better the other way round,
+  // re-run the bundle adjustment from the current result, repeat until nothing changes.
+  const buildObs = (o, sw) => {
+    const obs = [];
+    o.used.forEach((img, ci) => (img.pins || []).forEach(p => {
+      const fo = idx.featOf.get(p.v);
+      if (!fo) return;
+      let v = p.v;
+      if (fo.f.kind === 'line' && sw.has(img.id + ':' + fo.f.id)) v = fo.end === 'a' ? fo.f.b : fo.f.a;
+      if (o.res.pts.has(v)) obs.push({ ci, v, pv: p.v, u: p.x * img.w, vpx: p.y * img.h });
+    }));
+    return obs;
+  };
+  const relabel = (o, sw) => {
+    let n = 0;
+    for (let pass = 0; pass < 10; pass++) {
+      const cands = [];
+      o.used.forEach((img, ci) => {
+        const c = o.res.cams[ci], m = pinMapOf(img);
+        for (const f of feats) {
+          if (f.kind !== 'line') continue;
+          const A = o.res.pts.get(f.a), B = o.res.pts.get(f.b), pa = m.get(f.a), pb = m.get(f.b);
+          if (!A || !B || !pa || !pb) continue;
+          const key = img.id + ':' + f.id, isSw = sw.has(key);
+          const p1 = isSw ? pb : pa, p2 = isSw ? pa : pb;
+          const qa = projectPx(c, A), qb = projectPx(c, B);
+          if (!qa || !qb) continue;
+          const e = (q, p) => Math.hypot(q[0] - p.x * img.w, q[1] - p.y * img.h);
+          const keep = e(qa, p1) + e(qb, p2), flip = e(qa, p2) + e(qb, p1);
+          if (flip < keep - 0.5) cands.push({ key, gain: keep - flip, ratio: flip / keep });
+        }
+      });
+      if (!cands.length) break;
+      let pick = cands.filter(c => c.ratio < 0.7);
+      if (!pick.length) pick = [cands.sort((a, b) => b.gain - a.gain)[0]];
+      pick.forEach(c => (sw.has(c.key) ? sw.delete(c.key) : sw.add(c.key)));
+      const obs = buildObs(o, sw);
+      const r2 = bundle(o.res.cams, o.res.pts, obs, { iters: 100, scale: o.scale });
+      if (r2.cost < o.res.cost) { o = { ...o, res: r2, obs: r2.obs }; n += pick.length; }
+      else { pick.forEach(c => (sw.has(c.key) ? sw.delete(c.key) : sw.add(c.key))); break; }
+    }
+    return { o, n };
+  };
+  // Lines seen nearly end-on (short on screen) have an unreliable end order: leave them out of a first
+  // solve, then let that solution decide their ends, then solve with everything.
+  const drop = new Set();
+  for (const f of feats.filter(x => x.kind === 'line')) {
+    const lens = s.images.map(img => { const m = pinMapOf(img), a = m.get(f.a), b = m.get(f.b); return a && b ? Math.hypot((a.x - b.x) * img.w, (a.y - b.y) * img.h) : 0; });
+    const mx = Math.max(...lens);
+    s.images.forEach((img, i) => { if (lens[i] > 0 && lens[i] < 0.45 * mx) drop.add(img.id + ':' + f.id); });
+  }
+  const decideEnds = (o, sw) => {
+    o.used.forEach((img, ci) => {
+      const c = o.res.cams[ci], m = pinMapOf(img);
+      for (const f of feats) {
+        if (f.kind !== 'line') continue;
+        const A = o.res.pts.get(f.a), B = o.res.pts.get(f.b), pa = m.get(f.a), pb = m.get(f.b);
+        if (!A || !B || !pa || !pb) continue;
+        const qa = projectPx(c, A), qb = projectPx(c, B);
+        if (!qa || !qb) continue;
+        const e = (q, p) => Math.hypot(q[0] - p.x * img.w, q[1] - p.y * img.h);
+        const key = img.id + ':' + f.id;
+        if (e(qa, pb) + e(qb, pa) < e(qa, pa) + e(qb, pb)) sw.add(key); else sw.delete(key);
+      }
+    });
+  };
+  let out = null, swap = null, flipped = 0;
+  swapSets.forEach((sw0, k) => {
+    const sw = new Set(sw0);
+    const prog = p => onProgress && onProgress(0.7 * (k + p) / swapSets.length);
+    let r = null;
+    if (drop.size) {
+      const r0 = solveOnce(feats, s.images, sw, { quick: true, onProgress: prog, drop });
+      if (!r0.error) { decideEnds(r0, sw); r = solveOnce(feats, s.images, sw, { quick: true, onProgress: prog }); }
+    }
+    if (!r || r.error) r = solveOnce(feats, s.images, sw, { quick: true, onProgress: prog });
+    if (r.error) { if (!out) out = r; return; }
+    const rl = relabel(r, sw);
+    r = rl.o;
+    if (!out || out.error || r.res.cost < out.res.cost) { out = r; swap = sw; flipped = rl.n; }
+  });
+  if (out.error) return out;
+  if (!quick && out.res.rms > 1.5) {
+    const full = solveOnce(feats, s.images, swap, { onProgress: p => onProgress && onProgress(0.7 + 0.3 * p) });
+    if (!full.error) { const rl = relabel(full, swap); if (rl.o.res.cost < out.res.cost) { out = rl.o; flipped += rl.n; } }
+  }
+  let res = out.res;
+  if (solveFov) res = bundle(res.cams, res.pts, out.obs, { iters: 150, scale: out.scale, solveFov: true });
+  const used = out.used;
+
+  const ups = res.cams.map(c => new T.Vector3(0, 1, 0).applyQuaternion(c.q));
+  const m = referenceFrame(res.pts, ups) || autoFrame(res.pts, res.cams);
   const rq = new T.Quaternion(), tp = new T.Vector3(), ts = new T.Vector3();
   if (m) m.decompose(tp, rq, ts);
-
   used.forEach((img, ci) => {
     const c = res.cams[ci];
     P3.cam.setPose(img, m ? c.pos.clone().applyMatrix4(m) : c.pos, m ? rq.clone().multiply(c.q) : c.q);
     if (solveFov) img.fov = U.round(c.fov, 3);
+    img.placed = true;
   });
   for (const [v, p] of res.pts) idx.v.get(v).p = (m ? p.clone().applyMatrix4(m) : p).toArray().map(n => U.round(n, 6));
   for (const f of feats) if ((f.kind === 'point' ? [f.a] : [f.a, f.b]).every(v => res.pts.has(v))) f.solved = true;
+  // store marks the canonical way round, so each line's first end means the same physical end in every photo
+  swap = new Set();
+  (res.obs || out.obs).forEach(o => { const fo = o.pv != null && idx.featOf.get(o.pv); if (fo && fo.f.kind === 'line' && fo.end === 'a' && o.v !== o.pv) swap.add(out.used[o.ci].id + ':' + fo.f.id); });
+  for (const key of swap) {
+    const [iid, fid] = key.split(':').map(Number);
+    const img = idx.c.get(iid), f = idx.feat.get(fid);
+    if (!img || !f) continue;
+    for (const p of img.pins) { if (p.v === f.a) p.v = f.b; else if (p.v === f.b) p.v = f.a; }
+  }
   P3.reindex();
-  const perImg = used.map(img => ({ name: img.name, rms: solve.imageRms(img) }));
-  // Flat layouts (all marked points in one plane) can't be solved reliably — tell the user what helps.
+  const perImg = used.map(img => ({ id: img.id, name: img.name, rms: solve.imageRms(img) }));
   const P = [...res.pts.values()];
   const cen = P.reduce((a, p) => a.add(p.clone()), new T.Vector3()).divideScalar(P.length);
   const cov = [0, 1, 2].map(i => [0, 1, 2].map(j => P.reduce((a, p) => a + (p.getComponent(i) - cen.getComponent(i)) * (p.getComponent(j) - cen.getComponent(j)), 0)));
   const ev = jacobiEigen(cov).values;
   const flat = ev[0] > 0 && ev[2] / ev[0] < 0.002;
-  return { error: null, rms: res.rms, cams: used.length, points: res.pts.size, skipped, perImg, aligned: !!m, starts: cands.length, flat, unused: s.images.length - used.length };
+  return { error: null, rms: res.rms, cams: used.length, points: res.pts.size, skipped: out.skipped, perImg, aligned: !!m, starts: out.starts, flat, flipped, unused: s.images.length - used.length };
 };
 })();

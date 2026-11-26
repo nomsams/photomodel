@@ -448,7 +448,9 @@ vp.rebuild = () => {
     const a = idx.v.get(e.a), b = idx.v.get(e.b);
     if (!a || !b) continue;
     const o = idx.edgeObj.get(e.id);
-    const c = colorFor('e', e.id, o ? new T.Color(o.color) : baseLine);
+    const fa = idx.featOf.get(e.a), fb = idx.featOf.get(e.b);
+    const fcol = fa && fb && fa.f === fb.f ? new T.Color(fa.f.color) : null;
+    const c = colorFor('e', e.id, fcol || (o ? new T.Color(o.color) : baseLine));
     epos.push(...a.p, ...b.p);
     ecol.push(c.r, c.g, c.b, c.r, c.g, c.b);
   }
@@ -469,8 +471,9 @@ vp.rebuild = () => {
   const vpos = [], vcol = [];
   for (const v of s.vertices) {
     if (hid.v.has(v.id)) continue;
-    let c = colorFor('v', v.id, baseV);
-    if (c === baseV && pend.has(v.id)) c = COL.pend;
+    const fo = idx.featOf.get(v.id);
+    let c = colorFor('v', v.id, fo ? new T.Color(fo.f.color) : baseV);
+    if (!fo && c === baseV && pend.has(v.id)) c = COL.pend;
     vpos.push(...v.p);
     vcol.push(c.r, c.g, c.b);
   }

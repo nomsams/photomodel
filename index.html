@@ -91,6 +91,13 @@
       <input id="projectName" value="Untitled project" spellcheck="false" title="Project name">
       <span id="dirtyDot" class="dirty-dot hidden" title="Unsaved changes (Ctrl+S to save)"></span>
     </div>
+    <nav id="steps" class="steps-bar" aria-label="Workflow">
+      <button data-step="photos" title="Upload photos — they start in a circle"><b>1</b><span>Photos</span></button>
+      <button data-step="mark" title="Draw the same coloured lines / points in every photo (J)"><b>2</b><span>Mark</span></button>
+      <button data-step="place" title="Position all photos from your marks"><b>3</b><span>Place</span></button>
+      <button data-step="tune" title="Fine-tune each photo over the result"><b>4</b><span>Fine-tune</span></button>
+      <button data-step="model" title="Build and export the model"><b>5</b><span>Model</span></button>
+    </nav>
     <nav class="menu">
       <button class="ghost" data-action="newProject" title="New project"><svg class="ic"><use href="#i-new"/></svg><span>New</span></button>
       <button class="ghost" data-action="open" title="Open project (Ctrl+O)"><svg class="ic"><use href="#i-open"/></svg><span>Open</span></button>
@@ -179,6 +186,48 @@
       </section>
     </aside>
 
+    <section id="markScreen" class="hidden">
+      <div class="ms-main">
+        <div class="ms-head">
+          <button class="icon-btn" id="msPrev" title="Previous photo (Left arrow)"><svg class="ic"><use href="#i-left"/></svg></button>
+          <div class="ms-title"><b id="msName"></b><span id="msIndex" class="muted"></span></div>
+          <button class="icon-btn" id="msNext" title="Next photo (Right arrow)"><svg class="ic"><use href="#i-right"/></svg></button>
+          <span id="msErr" class="chip"></span>
+          <span id="msHint" class="ms-hint"></span>
+          <span class="spacer"></span>
+          <button class="small ghost" id="msFit" title="Fit photo (0)"><svg class="ic"><use href="#i-frame"/></svg>Fit</button>
+          <button id="msPlace" class="primary" title="Position all photos from the marks"><svg class="ic"><use href="#i-solve"/></svg>Place photos</button>
+          <button class="ghost" id="msClose" title="Back to 3D (Esc)"><svg class="ic"><use href="#i-close"/></svg></button>
+        </div>
+        <div id="msStage"><canvas id="msCanvas"></canvas></div>
+        <div id="msStrip" class="mb-strip"></div>
+      </div>
+      <aside class="ms-side">
+        <div class="ms-sec">
+          <div class="ms-sec-head"><span>Markers</span><span class="muted small">draw the same ones in every photo</span></div>
+          <div id="msMarkers"></div>
+          <div class="ms-add">
+            <button class="small" id="msAddLine" title="Add another line (L)"><svg class="ic"><use href="#i-span"/></svg>+ Line</button>
+            <button class="small" id="msAddPoint" title="Add a point (P)"><svg class="ic"><use href="#i-dot"/></svg>+ Point</button>
+          </div>
+        </div>
+        <div class="ms-sec">
+          <div class="ms-sec-head"><span>Previous photo</span>
+            <span class="ms-refnav"><button class="icon-btn ghost" id="msRefPrev" title="Other marked photo"><svg class="ic"><use href="#i-left"/></svg></button><span id="msRefName" class="muted small"></span><button class="icon-btn ghost" id="msRefNext" title="Other marked photo"><svg class="ic"><use href="#i-right"/></svg></button></span>
+          </div>
+          <div id="msRefBox"><canvas id="msRef" title="Click to open this photo"></canvas><div class="ms-ref-empty muted small">Your marks from the previous photo will show here.</div></div>
+        </div>
+        <div class="ms-sec ms-tips">
+          <ul>
+            <li><b>Drag</b> along a line (either end first) · <b>click</b> for a point</li>
+            <li>Drag a white end to fix it · right-click a mark to clear it</li>
+            <li><kbd>→</kbd> next photo · <kbd>1</kbd>–<kbd>9</kbd> pick marker · wheel = zoom</li>
+            <li>2–3 lines + 1 point per photo is enough. A point that sticks out (e.g. a fin tip) helps most.</li>
+          </ul>
+        </div>
+      </aside>
+    </section>
+
     <section id="viewWrap">
       <div id="overlayWrap" class="hidden"><img id="overlay" alt=""></div>
       <div id="viewport"></div>
@@ -194,7 +243,7 @@
         <div class="tb-sep"></div>
         <button data-tool="triangulate" title="Triangulate from photos (T)"><svg class="ic"><use href="#i-tri"/></svg></button>
         <button data-tool="match" title="Pin points in photos (K)"><svg class="ic"><use href="#i-pin"/></svg></button>
-        <button data-tool="mark" title="Mark features in photos (J)"><svg class="ic"><use href="#i-feature"/></svg></button>
+        <button data-action="startMarking" title="Mark photos (J)"><svg class="ic"><use href="#i-feature"/></svg></button>
         <div id="gizmoModes">
           <div class="tb-sep"></div>
           <button data-gizmo="translate" title="Move gizmo (W)"><svg class="ic"><use href="#i-move"/></svg></button>
@@ -259,30 +308,6 @@
           <button class="icon-btn ghost" data-nudge="r+" title="Roll right (.)"><svg class="ic"><use href="#i-roll-r"/></svg></button>
           <span class="pad-hint muted" id="cbFine">hold to repeat · Alt = fine</span>
         </div>
-      </div>
-
-      <div id="markRef" class="floating hidden">
-        <div class="mr-head">
-          <button class="icon-btn ghost" id="mrPrev" title="Previous reference photo"><svg class="ic"><use href="#i-left"/></svg></button>
-          <div class="mr-title"><span class="muted">Reference</span> <b id="mrName"></b> <span id="mrCount" class="muted"></span></div>
-          <button class="icon-btn ghost" id="mrNext" title="Next reference photo"><svg class="ic"><use href="#i-right"/></svg></button>
-          <button class="icon-btn ghost" id="mrToggle" title="Show / hide the reference photo"><svg class="ic chev"><use href="#i-down"/></svg></button>
-        </div>
-        <canvas id="mrCanvas" title="Click to open this photo"></canvas>
-        <div id="mrNote" class="mr-note muted"></div>
-      </div>
-
-      <div id="markBar" class="floating hidden">
-        <div class="mb-row">
-          <div id="mbChips" class="mb-chips"></div>
-          <button class="small ghost" id="mbAdd" title="Add a line, direction or point to mark"><svg class="ic"><use href="#i-feature"/></svg>+ Add</button>
-          <span class="spacer"></span>
-          <span id="mbStatus" class="chip"></span>
-          <button class="small toggle" id="mbModel" title="Show the solved model behind the photo"><svg class="ic"><use href="#i-cube"/></svg>Model</button>
-          <button class="small primary" data-action="solveFeatures" title="Full solve (also tries harder starting shapes)"><svg class="ic"><use href="#i-solve"/></svg>Solve</button>
-          <button class="small" data-action="exitCamera" title="Back to the 3D view (Esc)"><svg class="ic"><use href="#i-cube"/></svg>3D view</button>
-        </div>
-        <div id="mbStrip" class="mb-strip"></div>
       </div>
 
       <div id="emptyState" class="hidden">

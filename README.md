@@ -7,18 +7,17 @@ Plain HTML/CSS/JS with no build step. It is a static site, so GitHub Pages can s
 ## Run locally
 Open `index.html`, or serve the folder (`npx serve .`) and open the URL.
 
-## Main workflow: mark features, cameras solve themselves
-1. **Import photos** of one object from different sides.
-2. **Start marking** (`J`) and pick a preset (aircraft, vehicle, generic) or add your own features:
-   - a **direction** (tail → nose),
-   - 2–3 **lines** (always the object's left end → right end, e.g. main and rear wingspan),
-   - optional **points** — at least one that sticks out of the main plane, e.g. a tail fin tip.
-3. In each photo, drag across each feature. The features are colour-coded:
-   - the bottom bar shows which ones are done in this photo, and a filmstrip shows progress for every photo;
-   - a **reference card** shows the previous photo with its markings, so you can match the same spots the same way round.
-4. Once two photos have 4+ marks each, **auto-solve** fits all cameras and the feature shape together (bundle adjustment from an affine-factorisation start). The object is placed facing +X, upright on the grid. Give a feature a real length to get real units.
-5. Build on top (points, lines, faces, extrude…), check the model overlaid on every photo, and export.
+## Workflow (the step bar at the top)
+1. **Photos:** upload photos of one object from different sides. They start out placed in a circle.
+2. **Mark:** a full-screen page. In each photo, drag along the same 2–3 colour-coded **lines** and click the same **point**(s). You can start a line from either end.
+   - The previous photo with its marks is shown alongside.
+   - A filmstrip shows which photos are done.
+   - Use `→` to move to the next photo.
+3. **Place:** one click positions every photo (and the marked lines) from the marks. Each photo gets a fit error, and the dashed lines show where the solved shape lands in it.
+4. **Fine-tune:** look through any photo and nudge it with the pad or the arrow keys (hold `Alt` for tiny steps).
+5. **Model:** build on the result (points, lines, faces, extrude…), check it against every photo, and export.
 
+Tip: a point that sticks out of the plane of your lines (e.g. a tail fin tip) makes placement much more reliable.
 Feature definitions can be saved as a **feature set** and loaded into another project, so similar objects ("cousins") are marked the same way.
 
 **Point clouds and Gaussian splats.** Dense reconstruction and splat training need a GPU pipeline that can't run in a web page, so bring them in from other tools:

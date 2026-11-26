@@ -1328,14 +1328,14 @@ function showHelp() {
       <li><b>Combine</b> faces and lines into named objects; extrude, mirror and duplicate to build faster.</li>
       <li><b>Scale</b> the scene from one line of known length, then <b>export</b> OBJ, GLB, STL, PLY or camera poses.</li>` }),
     h('p', { class: 'small', html: 'Not sure where to start? <a href="#" data-action="demo">Load the demo</a> — photo 4 is deliberately misplaced; open it and press <b>Solve</b>.' }),
-    h('h3', {}, 'Features: place cameras automatically'),
+    h('h3', {}, 'The main workflow — follow the step bar at the top'),
     h('ol', { html: `
-      <li>In <b>Features</b>, add a <b>Direction</b> (tail → nose) and one or more <b>Lines</b> (e.g. the wingspan, drawn left → right) and <b>Points</b> (e.g. the tail fin tip).</li>
-      <li>Open each photo and draw them with the <b>Mark</b> tool (<kbd>J</kbd>): drag across the feature; it moves on to the next one automatically. Drag the end marks to fix them.</li>
-      <li>Press <b>Solve</b>: every camera and the feature shape are fitted together (bundle adjustment). The object ends up facing +X, upright on the grid. Give a feature a real length to get real units.</li>
-      <li>Save the <b>feature set</b> to reuse the same definitions on a similar object.</li>` }),
-    h('p', { class: 'small', html: 'Each photo needs 4+ marked points (a direction + a line is 4). A point off the main plane — like a tail fin tip — makes the solve far more reliable.' }),
-    h('h3', {}, 'Point clouds & Gaussian splats'),
+      <li><b>Photos</b> — upload photos of one object; they start in a circle.</li>
+      <li><b>Mark</b> (<kbd>J</kbd>) — in each photo, drag along the same 2–3 coloured lines (either end first) and click the same point. The previous photo is shown for reference; <kbd>→</kbd> goes to the next photo; drag a white end to fix it.</li>
+      <li><b>Place</b> — one click positions every photo from your marks.</li>
+      <li><b>Fine-tune</b> — look through a photo and nudge it with the pad or arrow keys (hold <kbd>Alt</kbd> for tiny steps).</li>
+      <li><b>Model</b> — build on the result and export.</li>` }),
+    h('p', { class: 'small', html: 'Each photo needs 2 lines (or 4 points). A point that sticks out of the lines’ plane — like a tail fin tip — makes placement much more reliable.' }),    h('h3', {}, 'Point clouds & Gaussian splats'),
     h('p', { class: 'small', html: 'Building dense point clouds or training Gaussian splats needs a GPU pipeline that can’t run in a web page. Use a dedicated tool and bring the result in:<br>• <b>COLMAP</b> (free): run it on the same photos, export the model as text, then <b>Import → COLMAP</b> — every camera is placed automatically and the sparse point cloud comes along.<br>• <b>Splats</b> from Postshot, Polycam, Luma, Kiri, etc.: <b>Import → Gaussian splat</b> (.ply / .splat) shows the splat centres as coloured points you can snap to.<br>• Any <b>point cloud</b> (.ply, .xyz…): <b>Import → Point cloud</b>.' }),
     h('h3', {}, 'Shortcuts'),
     h('div', { class: 'help-grid' }, SHORTCUTS.flatMap(([k, d]) => [h('div', {}, ...k.split(/\s{2,}|\s·\s/).flatMap((x, i) => [i ? ' ' : '', h('kbd', {}, x.trim())])), h('div', { class: 'muted' }, d)])));
@@ -1359,6 +1359,7 @@ ui.demoTour = () => {
 
 /* ================================================================== keyboard */
 function onKey(e) {
+  if (P3.markview.isOpen() && !(e.ctrlKey || e.metaKey) && !modalOpen()) return;
   if (modalOpen()) { if (e.key === 'Escape') { e.preventDefault(); closeTopModal(); } return; }
   const t = e.target;
   const typing = (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button'].includes(t.type)) || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable;
@@ -1596,7 +1597,53 @@ function bind() {
   P3.on('settings', key => { updateHud(); updateBanner(); renderCloud(); if (key === 'units' || key === '*') renderProps(true); });
   P3.on('cloud', () => { renderCloud(); updateCounts(); });
   P3.on('project', () => { $('#projectName').value = P3.project.name; renderAll(); });
+  document.querySelectorAll('#steps [data-step]').forEach(b => b.addEventListener('click', () => { stepClick(b.dataset.step); b.blur(); }));
+  for (const ev of ['steps', 'change', 'view', 'history', 'project']) P3.on(ev, () => updateSteps());
 }
+
+/* ================================================================== workflow step bar */
+A.placePhotos = () => P3.markview.place();
+A.fineTune = () => P3.markview.fineTune(P3.sel.ids('c')[0] || vp.activeCam);
+function stepClick(step) {
+  const s = S();
+  const placed = s.images.some(i => i.placed);
+  if (step === 'photos') {
+    if (!s.images.length) return A.importImages();
+    P3.markview.close(); vp.exitCamera();
+    const ws = $('#workspace');
+    if (narrow()) ws.classList.add('open-left'); else ws.classList.remove('hide-left');
+    vp.frame();
+    ui.toast('Your photos — add more with “+ Add”. They start in a circle until you place them.');
+  } else if (step === 'mark') P3.markview.open();
+  else if (step === 'place') P3.markview.place();
+  else if (step === 'tune') { if (!placed) return ui.toast('Place the photos first (step 3)', 'error'); A.fineTune(); }
+  else if (step === 'model') { P3.markview.close(); vp.exitCamera(); P3.tools.set('select'); vp.frame(); }
+  updateSteps();
+}
+function updateSteps() {
+  const s = S();
+  const n = s.images.length;
+  const marked = s.images.filter(i => (i.pins || []).filter(p => idx.featOf.has(p.v)).length >= 4).length;
+  const placed = s.images.filter(i => i.placed).length;
+  const cur = P3.markview.isOpen() ? 'mark' : vp.activeCam ? 'tune' : !n ? 'photos' : placed ? 'model' : null;
+  const done = { photos: n > 0, mark: marked >= 2, place: placed > 0, tune: false, model: false };
+  const next = !done.photos ? 'photos' : !done.mark ? 'mark' : !done.place ? 'place' : null;
+  const tips = {
+    photos: n ? `${n} photo${n === 1 ? '' : 's'} loaded` : 'Upload photos — they start in a circle',
+    mark: `Draw the same coloured lines / points in every photo · ${marked}/${n} photos marked (J)`,
+    place: placed ? `${placed}/${n} photos placed — click to place again` : 'Position all photos from your marks',
+    tune: 'Fine-tune each photo over the result',
+    model: 'Build on the result, then export',
+  };
+  document.querySelectorAll('#steps [data-step]').forEach(b => {
+    const k = b.dataset.step;
+    b.classList.toggle('done', !!done[k]);
+    b.classList.toggle('current', k === cur);
+    b.classList.toggle('next', k === next);
+    if (b.dataset.tip !== undefined) b.dataset.tip = tips[k]; else b.title = tips[k];
+  });
+}
+ui.updateSteps = updateSteps;
 
 /* ================================================================== init */
 ui.init = async () => {
