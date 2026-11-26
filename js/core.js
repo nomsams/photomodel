@@ -86,6 +86,9 @@ const DEFAULTS = (P3.DEFAULT_SETTINGS = {
   snapEdges: true,
   workPlane: 'XZ',
   workPlaneOffset: 0,
+  customPlane: null, // {o:[x,y,z], n:[x,y,z], u:[x,y,z]} when workPlane === 'custom'
+  stickToFace: true,
+  photoMoveSpeed: 0.5,
   defaultFov: 50,
   useExifFov: true,
   maxImageSize: 2048,

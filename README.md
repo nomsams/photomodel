@@ -10,6 +10,12 @@ Open `index.html`, or serve the folder (`npx serve .`) and open the URL.
 ## Features
 - **Photos as cameras.** FOV is read from the EXIF 35 mm focal length when the photo has one. Large photos are downscaled on import. Pose and FOV can be edited with numbers, a gizmo, or *Align* mode, where orbiting moves the camera until the photo lines up.
 - **Photo view.** Look through any photo with it overlaid on the model (on top or behind, adjustable opacity). Zoom and pan the photo (wheel / right-drag), and use the magnifier loupe for precise clicks. Step between photos or jump to the nearest one.
+- **Moving photo cameras.**
+  - *Move to current view*: fly the 3D view to roughly where the photo was taken and drop the camera there.
+  - A *Move camera* pad in photo view: orbit / slide, closer / farther, roll. Buttons repeat while held, and the arrow keys, PgUp/PgDn and `,` `.` do the same.
+  - A movement-speed setting; hold `Alt` for 4× finer steps.
+  - The photo panel can be collapsed and dragged out of the way.
+- **Drawing on the object.** A line or face started on a face stays on that face's plane, even past its edges. *Plane from selection* sets the drawing plane from a face or 3+ points.
 - **Pins & solving.** Pin model points where they appear in a photo. With 4+ pins, **Solve** finds that camera's position (6+ pins also gives the FOV). Pins show their reprojection error, and you can drag them to adjust. *Refine all* re-solves every camera and point together.
 - **Triangulate.** Click the same feature in 2+ photos to get an exact 3D point. The clicks are kept as pins.
 - **Modelling.**

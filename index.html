@@ -57,6 +57,12 @@
   <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
   <symbol id="i-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 14.5l6-6 6 6"/></symbol>
+  <symbol id="i-roll-l" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/></symbol>
+  <symbol id="i-roll-r" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/></symbol>
+  <symbol id="i-closer" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8 11h6M11 8v6"/></symbol>
+  <symbol id="i-farther" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5M8 11h6"/></symbol>
+  <symbol id="i-plane" viewBox="0 0 24 24"><path d="M3 15l6-6h12l-6 6z"/><path d="M12 12V4M9.5 6.5L12 4l2.5 2.5"/></symbol>
   <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 8.5V4h4.5M15.5 4H20v4.5M20 15.5V20h-4.5M8.5 20H4v-4.5"/><circle cx="12" cy="12" r="2.5"/></symbol>
   <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
   <symbol id="i-magnet" viewBox="0 0 24 24"><path d="M5.5 4.5h4v7a2.5 2.5 0 0 0 5 0v-7h4v7a6.5 6.5 0 0 1-13 0z"/><path d="M5.5 8.5h4M14.5 8.5h4"/></symbol>
@@ -175,10 +181,12 @@
             <option value="XZ">Ground XZ</option>
             <option value="XY">Front XY</option>
             <option value="YZ">Side YZ</option>
+            <option value="custom">Custom (from selection)</option>
           </select>
         </label>
         <input id="hudOffset" type="number" step="0.1" title="Work plane offset (distance along its normal)">
-        <button class="small" data-action="planeToSelection" title="Move work plane through the selected point">Through sel.</button>
+        <button class="small" data-action="planeFromSelection" title="Draw on the selected face, or the plane through 3+ selected points (e.g. the corners of a wall)"><svg class="ic"><use href="#i-plane"/></svg>Plane from sel.</button>
+        <button class="small" data-action="planeToSelection" title="Move the work plane through the selected point">Through sel.</button>
         <button class="toggle small" id="hudSnap" data-action="toggleSnap" title="Snap to grid (S) — hold Alt to bypass"><svg class="ic"><use href="#i-magnet"/></svg>Snap</button>
         <span class="sep"></span>
         <button class="small" data-action="frame" title="Frame all / selection (Home)"><svg class="ic"><use href="#i-frame"/></svg>Frame</button>
@@ -197,12 +205,30 @@
           <button id="cbAlign" class="toggle small" data-action="toggleAlign" title="Align mode (A): orbit / pan / zoom moves THIS camera so the photo lines up with the model"><svg class="ic"><use href="#i-align"/></svg>Align</button>
           <button id="cbOverlay" class="toggle small" data-action="toggleOverlay" title="Show / hide the photo (O)"><svg class="ic"><use href="#i-image"/></svg>Photo</button>
           <button class="small" data-action="exitCamera" title="Back to free view (Esc)"><svg class="ic"><use href="#i-close"/></svg>Exit</button>
+          <button class="icon-btn ghost" id="cbMore" title="Show / hide sliders and the Move camera pad"><svg class="ic chev"><use href="#i-down"/></svg></button>
         </div>
         <div class="cb-row cb-sliders">
           <label class="cb-ctl" title="Photo overlay opacity">Opacity <input type="range" id="cbOpacity" min="0" max="1" step="0.01"></label>
           <label class="cb-ctl" title="Vertical field of view of this photo">FOV <input type="range" id="cbFov" min="5" max="120" step="0.1"><span id="cbFovVal" class="mono"></span></label>
           <label class="cb-ctl" title="Camera roll">Roll <input type="range" id="cbRoll" min="-180" max="180" step="0.1"></label>
           <button class="small ghost" id="cbZoom" data-action="resetPhotoZoom" title="Photo zoom — wheel to zoom, right/middle-drag to pan, click to reset (Home)">100%</button>
+        </div>
+        <div class="cb-row cb-pad">
+          <span class="pad-label">Move camera</span>
+          <div class="seg">
+            <button class="small on" data-padmode="orbit" title="Arrows orbit the camera around the model">Orbit</button>
+            <button class="small" data-padmode="pan" title="Arrows slide the camera sideways / up (Shift+arrows)">Slide</button>
+          </div>
+          <button class="icon-btn ghost" data-nudge="x-" title="Left (Left arrow)"><svg class="ic"><use href="#i-left"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="y+" title="Up (Up arrow)"><svg class="ic"><use href="#i-up"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="y-" title="Down (Down arrow)"><svg class="ic"><use href="#i-down"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="x+" title="Right (Right arrow)"><svg class="ic"><use href="#i-right"/></svg></button>
+          <span class="sep"></span>
+          <button class="icon-btn ghost" data-nudge="d+" title="Closer (PgUp)"><svg class="ic"><use href="#i-closer"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="d-" title="Farther (PgDn)"><svg class="ic"><use href="#i-farther"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="r-" title="Roll left (,)"><svg class="ic"><use href="#i-roll-l"/></svg></button>
+          <button class="icon-btn ghost" data-nudge="r+" title="Roll right (.)"><svg class="ic"><use href="#i-roll-r"/></svg></button>
+          <span class="pad-hint muted" id="cbFine">hold to repeat · Alt = fine</span>
         </div>
       </div>
 

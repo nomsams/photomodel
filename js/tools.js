@@ -9,12 +9,12 @@ const M = P3.model;
 const idx = P3.idx;
 
 const tools = (P3.tools = { current: 'select', defs: {} });
-const st = { lineStart: null, facePts: [], rays: [], matchVid: null };
+const st = { lineStart: null, facePts: [], rays: [], matchVid: null, lock: null };
 const RAY_COLORS = ['#ff6b6b', '#4fc3f7', '#7bd88f', '#ffd166', '#e06cff', '#57d9c5'];
 const TOOL_NAMES = { select: 'Select', point: 'Point', line: 'Line', face: 'Face', triangulate: 'Triangulate', match: 'Pin' };
 
 /* ------------------------------------------------------------------ helper visuals */
-let snapObj = null, previewObj = null, raysObj = null, solvedObj = null;
+let snapObj = null, previewObj = null, raysObj = null, solvedObj = null, lockObj = null;
 function ensureHelpers() {
   if (snapObj) return;
   const g = new T.BufferGeometry();
@@ -29,12 +29,35 @@ function ensureHelpers() {
   solvedObj = new T.Points(g.clone(), new T.PointsMaterial({ size: 17, sizeAttenuation: false, color: 0xffffff, depthTest: false }));
   solvedObj.renderOrder = 21;
   solvedObj.visible = false;
-  vp.helperGroup.add(snapObj, previewObj, raysObj, solvedObj);
+  lockObj = new T.Mesh(new T.PlaneGeometry(1, 1), new T.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12, side: T.DoubleSide, depthWrite: false }));
+  lockObj.renderOrder = 17;
+  lockObj.visible = false;
+  vp.helperGroup.add(snapObj, previewObj, raysObj, solvedObj, lockObj);
+}
+
+/* Sticky drawing plane: once a stroke starts on a face, later points stay on that face's plane. */
+function setLock(fr) {
+  ensureHelpers();
+  st.lock = fr;
+  if (fr) {
+    const pts = idx.f.get(fr.faceId) ? idx.f.get(fr.faceId).v.map(id => M.vpos(id)) : [];
+    const size = Math.max(0.5, ...pts.map(p => p.distanceTo(fr.o))) * 4;
+    lockObj.scale.set(size, size, 1);
+    lockObj.quaternion.setFromRotationMatrix(new T.Matrix4().makeBasis(fr.u, fr.v.clone().negate(), fr.n));
+    lockObj.position.copy(fr.o);
+    lockObj.material.color.set(P3.ACCENTS[P3.settings.accent] || '#22d3ee');
+  }
+  lockObj.visible = !!fr;
+  vp.requestRender();
+  if (P3.ui && P3.ui.hint) P3.ui.hint();
+}
+function maybeLock(r) {
+  if (!st.lock && r && r.kind === 'face' && r.face != null && P3.settings.stickToFace) setLock(vp.faceFrame(r.face));
 }
 
 const SNAP = {
   vertex: [0xff9f1c, 'point'], midpoint: [0xffd166, 'midpoint'], edge: [0xe0e0e0, 'on line'],
-  cloud: [0xe06cff, 'cloud point'], face: [0x7bd88f, 'on face'], plane: [0x22d3ee, 'work plane'],
+  cloud: [0xe06cff, 'cloud point'], face: [0x7bd88f, 'on face'], plane: [0x22d3ee, 'work plane'], locked: [0x7bd88f, 'on face plane'],
 };
 function showSnap(r, extra) {
   ensureHelpers();
@@ -66,6 +89,7 @@ function clearHelpers() {
 /* ------------------------------------------------------------------ point resolution with snapping */
 function resolve(e) {
   if (!vp.inView(e)) return null;
+  const lock = st.lock && (tools.current === 'line' || tools.current === 'face') ? st.lock : null;
   const v = vp.pick(e, { types: ['v'] });
   if (v) return { kind: 'vertex', id: v.id, pos: v.pos };
   if (P3.settings.snapEdges) {
@@ -81,10 +105,11 @@ function resolve(e) {
       return { kind: 'edge', pos: on, edge: ed.id };
     }
   }
+  if (lock) { const lp = vp.planePoint(e, !e.altKey, lock); if (lp) return { kind: 'locked', pos: lp }; }
   const cp = vp.pickCloud(e);
   if (cp) return { kind: 'cloud', pos: cp };
   const f = vp.pick(e, { types: ['f'] });
-  if (f && f.type === 'f') return { kind: 'face', pos: f.point.clone() };
+  if (f && f.type === 'f') return { kind: 'face', pos: f.point.clone(), face: f.id };
   const p = vp.planePoint(e, !e.altKey);
   if (p) return { kind: 'plane', pos: p };
   return null;
@@ -158,7 +183,7 @@ tools.defs.point = {
 
 tools.defs.line = {
   hint: () => st.lineStart
-    ? 'Click the next point · Shift = lock to axis · Right-click, Enter or Esc to finish'
+    ? (st.lock ? 'Drawing on the face plane · ' : '') + 'Click the next point · Shift = lock to axis · Right-click, Enter or Esc to finish'
     : 'Click to start a line (snaps to points, midpoints, lines) · Lines chain until you finish',
   hover(e) {
     const r = constrain(resolve(e), e, st.lineStart && st.lineStart.pos);
@@ -168,6 +193,7 @@ tools.defs.line = {
   click(e) {
     const r = constrain(resolve(e), e, st.lineStart && st.lineStart.pos);
     if (!r) return;
+    maybeLock(r);
     if (!st.lineStart) { st.lineStart = r; P3.ui.hint(); vp.rebuild(); return; }
     if (r.kind === 'vertex' && st.lineStart.kind === 'vertex' && r.id === st.lineStart.id) return;
     if (r.pos.distanceTo(st.lineStart.pos) < 1e-9) return;
@@ -180,8 +206,9 @@ tools.defs.line = {
   rightClick() { this.cancel(); },
   enter() { this.cancel(); },
   cancel() {
-    const had = !!st.lineStart;
+    const had = !!st.lineStart || !!st.lock;
     st.lineStart = null;
+    setLock(null);
     setPreview(null);
     P3.ui.hint();
     vp.rebuild();
@@ -191,7 +218,7 @@ tools.defs.line = {
 
 tools.defs.face = {
   hint: () => st.facePts.length
-    ? `${st.facePts.length} corner(s) · click the first point or press Enter to close · Backspace = remove last · Esc = cancel`
+    ? `${st.lock ? 'On the face plane · ' : ''}${st.facePts.length} corner(s) · click the first point or press Enter to close · Backspace = remove last · Esc = cancel`
     : 'Click 3+ corners in order to outline a face · Or select points and press Enter',
   hover(e) {
     const r = resolve(e);
@@ -206,6 +233,7 @@ tools.defs.face = {
     const first = st.facePts[0];
     if (st.facePts.length >= 3 && r.kind === 'vertex' && first.kind === 'vertex' && r.id === first.id) return finishFace();
     if (r.kind === 'vertex' && st.facePts.some(p => p.kind === 'vertex' && p.id === r.id)) return;
+    maybeLock(r);
     st.facePts.push(r);
     P3.ui.hint();
     vp.rebuild();
@@ -225,8 +253,9 @@ tools.defs.face = {
     return true;
   },
   cancel() {
-    const had = st.facePts.length > 0;
+    const had = st.facePts.length > 0 || !!st.lock;
     st.facePts = [];
+    setLock(null);
     setPreview(null);
     P3.ui.hint();
     vp.rebuild();
@@ -237,6 +266,7 @@ function finishFace() {
   const ids = st.facePts.map(ensureVertex);
   const fid = M.addFace(ids);
   st.facePts = [];
+  setLock(null);
   setPreview(null);
   if (fid) { P3.history.commit('Add face'); P3.sel.set(['f:' + fid]); }
   else P3.ui.toast('Could not create face (need 3 distinct corners)', 'error');
@@ -339,6 +369,8 @@ tools.defs.match = {
     return had;
   },
 };
+tools.unlock = () => { if (!st.lock) return false; setLock(null); return true; };
+tools.locked = () => !!st.lock;
 tools.matchVertex = () => (tools.current === 'match' ? st.matchVid : null);
 
 /* ------------------------------------------------------------------ public API */
@@ -349,6 +381,7 @@ tools.set = name => {
   if (!tools.defs[name]) return;
   const t = tools.tool();
   if (t.cancel) t.cancel();
+  setLock(null);
   tools.current = name;
   clearHelpers();
   vp.hover = null;

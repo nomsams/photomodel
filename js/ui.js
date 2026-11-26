@@ -325,9 +325,49 @@ A.toggleTheme = () => P3.setSetting('theme', P3.settings.theme === 'dark' ? 'lig
 A.planeToSelection = () => {
   const vids = M.selectedVertexIds();
   if (!vids.length) return ui.toast('Select a point first', 'error');
-  P3.setSetting('workPlaneOffset', U.round(M.centroid(vids)[vp.planeAxis()], 4));
+  const c = M.centroid(vids);
+  const ax = vp.planeAxis();
+  if (ax) P3.setSetting('workPlaneOffset', U.round(c[ax], 4));
+  else {
+    const cp = Object.assign({}, P3.settings.customPlane, { o: c.toArray().map(n => U.round(n, 5)) });
+    P3.settings.workPlaneOffset = 0;
+    P3.setSetting('customPlane', cp);
+  }
   ui.toast('Work plane moved through the selection');
 };
+/** Work plane from the selected face, or the plane through 3+ selected points. */
+A.planeFromSelection = () => {
+  let fr = null;
+  const fs = P3.sel.ids('f');
+  if (fs.length) fr = vp.faceFrame(fs[0]);
+  else {
+    const ordered = [...P3.sel.ids('v'), ...M.selectedVertexIds()].filter((v, i, a) => a.indexOf(v) === i);
+    if (ordered.length < 3) return ui.toast('Select a face, or 3+ points on the surface you want to draw on (e.g. the corners of a wall)', 'error');
+    const pts = ordered.map(id => M.vpos(id));
+    let n = P3.geom.normal(pts);
+    if (n.lengthSq() < 0.5) n = pts[1].clone().sub(pts[0]).cross(pts[2].clone().sub(pts[0])).normalize();
+    if (!(n.lengthSq() > 0.5)) return ui.toast('Those points are in a straight line — pick points that span a surface', 'error');
+    const o = M.centroid(ordered);
+    const u = pts[1].clone().sub(pts[0]);
+    fr = { o, n, u };
+  }
+  if (!fr) return ui.toast('Could not make a plane from that face', 'error');
+  const r = a => a.toArray().map(x => U.round(x, 6));
+  P3.settings.workPlaneOffset = 0;
+  P3.settings.workPlane = 'custom';
+  P3.setSetting('customPlane', { o: r(fr.o), n: r(fr.n), u: r(fr.u) }); // new object → always saved + redrawn
+  ui.toast('Drawing on the selected surface — points now land on this plane (switch back to Ground XZ in the plane menu)', 'ok');
+};
+A.cameraFromView = id => {
+  id = +id || P3.sel.ids('c')[0];
+  const img = idx.c.get(id);
+  if (!img) return;
+  if (vp.activeCam) return ui.toast('Leave the photo view first, then fly the 3D view to where the photo was taken', 'error');
+  vp.cameraFromView(id);
+  commitT('Move camera to view');
+  undoToast(`Moved “${img.name}” to the current view — look through it to check, then fine-tune with the pad`, 'ok');
+};
+A.nudge = (kind, dx, dy) => { if (!vp.activeCam) return; vp.nudgeCamera(kind, dx, dy); };
 A.arrange = async () => {
   const selCams = P3.sel.ids('c');
   const st = P3.settings;
@@ -476,7 +516,10 @@ const CMDS = [
   { g: 'Model', l: 'Duplicate', i: 'copy', k: 'Ctrl D', run: A.duplicate, when: () => has.geo(), ctx: true },
   ...['x', 'y', 'z'].map(a => ({ g: 'Model', l: `Mirror across ${a.toUpperCase()} = 0`, run: () => A.mirror(a), when: () => has.geo(), ctx: a === 'x' })),
   { g: 'Model', l: 'Group into object', i: 'layers', k: 'Ctrl G', run: A.groupSelection, when: () => has.geo(), ctx: true },
-  { g: 'Model', l: 'Move work plane through selection', i: 'grid', run: A.planeToSelection, when: () => has.geo(), ctx: true },
+  { g: 'Model', l: 'Draw on this surface (plane from selection)', i: 'plane', run: A.planeFromSelection, when: () => has.f() || M.selectedVertexIds().length >= 3, ctx: true },
+  { g: 'Model', l: 'Move work plane through selection', i: 'grid', run: A.planeToSelection, when: () => has.geo() },
+  { g: 'Model', l: 'Draw on the ground plane again', i: 'grid', run: () => P3.setSetting('workPlane', 'XZ'), when: () => P3.settings.workPlane !== 'XZ' },
+  { g: 'Photos', l: 'Move selected camera to current 3D view', i: 'camera', run: () => A.cameraFromView(), when: () => has.c() === 1 && !has.cam(), ctx: true },
   { g: 'Photos', l: 'Re-triangulate selected points from pins', i: 'tri', run: A.retriangulate, when: () => P3.sel.ids('v').some(id => (idx.pins.get(id) || []).length >= 2), ctx: true },
   { g: 'Photos', l: 'Look through selected photo', i: 'camera', run: () => A.lookThrough(), when: () => has.c() === 1, ctx: true },
   { g: 'Photos', l: 'Solve camera from pins', i: 'solve', run: () => A.solveCamera(), when: () => (has.c() === 1 || has.cam()), ctx: true },
@@ -596,6 +639,25 @@ function renderImageList() {
         h('button', { class: 'danger', title: 'Delete photo', onclick: e => { e.stopPropagation(); A.deletePhoto(img.id); } }, icon('trash'))));
     item.addEventListener('click', e => { if (e.shiftKey || e.ctrlKey || e.metaKey) P3.sel.toggle('c:' + img.id); else P3.sel.set(['c:' + img.id]); });
     item.addEventListener('dblclick', () => vp.enterCamera(img.id));
+    // drag to reorder (the order is used by [ / ] and Arrange)
+    item.draggable = true;
+    item.addEventListener('dragstart', e => { e.dataTransfer.setData('application/x-p3-photo', String(img.id)); e.dataTransfer.effectAllowed = 'move'; item.classList.add('dragging'); });
+    item.addEventListener('dragend', () => item.classList.remove('dragging'));
+    item.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('application/x-p3-photo')) { e.preventDefault(); e.stopPropagation(); item.classList.add('drag-over'); } });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    item.addEventListener('drop', e => {
+      const from = +e.dataTransfer.getData('application/x-p3-photo');
+      item.classList.remove('drag-over');
+      if (!from) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (from === img.id) return;
+      const arr = S().images;
+      const moving = arr.find(i => i.id === from);
+      arr.splice(arr.indexOf(moving), 1);
+      arr.splice(arr.indexOf(img), 0, moving);
+      commit('Reorder photos');
+    });
     item.addEventListener('contextmenu', e => { e.preventDefault(); if (!P3.sel.has('c', img.id)) P3.sel.set(['c:' + img.id]); ui.contextMenu(e.clientX, e.clientY); });
     list.append(item);
   }
@@ -717,7 +779,9 @@ function buildFields() {
     F.push({ type: 'buttons', items: [
       btn(vp.activeCam === img.id ? 'Exit photo view' : 'Look through', () => (vp.activeCam === img.id ? vp.exitCamera() : vp.enterCamera(img.id)), { cls: 'primary small', icon: 'camera' }),
       btn('Aim at model', () => A.lookAtCenter(img.id), { cls: 'small', icon: 'target', title: 'Point this camera at the centre of the model' }),
+      btn('Move to current view', () => A.cameraFromView(img.id), { cls: 'small', icon: 'camera', disabled: !!vp.activeCam, title: 'Fly the 3D view to roughly where this photo was taken, then click to put the camera there' }),
     ] });
+    F.push({ type: 'html', html: '<div class="p-info">Easiest way to place a photo: fly the 3D view to roughly where it was taken → <b>Move to current view</b> → <b>Look through</b> → fine-tune with the <b>Move camera</b> pad or arrow keys (hold <kbd>Alt</kbd> for fine steps). With 4+ pins, <b>Solve</b> places it exactly.</div>' });
     F.push({ type: 'sub', text: `Pins (${n})` });
     F.push({ type: 'info', html: () => {
       const k = (img.pins || []).length;
@@ -939,8 +1003,9 @@ function updateZoomBadge() {
   if (b) { b.textContent = Math.round(vp.pz.z * 100) + '%'; b.disabled = vp.alignMode; }
 }
 function updateHud() {
-  $('#hudPlane').value = P3.settings.workPlane;
+  $('#hudPlane').value = P3.settings.workPlane === 'custom' && !P3.settings.customPlane ? 'XZ' : P3.settings.workPlane;
   if (document.activeElement !== $('#hudOffset')) $('#hudOffset').value = P3.settings.workPlaneOffset;
+  $('#hudPlane').closest('.hud-field').classList.toggle('custom-on', P3.settings.workPlane === 'custom');
   $('#hudSnap').classList.toggle('on', !!P3.settings.snapToGrid);
 }
 function updateToolbar() {
@@ -993,6 +1058,7 @@ const SETTINGS_SCHEMA = [
   { key: 'faceColor', label: 'Face colour (ungrouped)', type: 'color' },
   { key: 'showAxes', label: 'Show axes', type: 'check' },
   { group: 'Photo view' },
+  { key: 'photoMoveSpeed', label: 'Photo view movement speed (Align, pad, zoom, pan)', type: 'range', min: 0.1, max: 1.5, step: 0.05 },
   { key: 'overlayOpacity', label: 'Photo overlay opacity', type: 'range', min: 0, max: 1, step: 0.05 },
   { key: 'overlayMode', label: 'Photo position', type: 'select', options: [['over', 'On top of model'], ['under', 'Behind model']] },
   { key: 'showPins', label: 'Show pins & error lines', type: 'check' },
@@ -1009,6 +1075,7 @@ const SETTINGS_SCHEMA = [
   { key: 'snapToGrid', label: 'Snap to grid', type: 'check' },
   { key: 'snapStep', label: 'Snap step', type: 'number', step: 0.05, min: 0.0001 },
   { key: 'snapEdges', label: 'Snap to lines & midpoints', type: 'check' },
+  { key: 'stickToFace', label: 'Keep lines / faces on the face they start on', type: 'check' },
   { key: 'snapRadius', label: 'Snap / pick radius (px)', type: 'range', min: 4, max: 30, step: 1 },
   { group: 'Photos' },
   { key: 'useExifFov', label: 'Use EXIF focal length for FOV', type: 'check' },
@@ -1068,6 +1135,9 @@ const SHORTCUTS = [
   ['[  ]  ·  N', 'Previous / next photo · nearest photo'],
   ['Wheel · right-drag', 'In photo view: zoom / pan the photo (Home resets)'],
   ['A  ·  O', 'Align mode · show/hide photo overlay'],
+  ['Arrows · Shift+arrows', 'In photo view: orbit / slide the photo camera (pad mode decides which)'],
+  ['PgUp PgDn  ·  ,  .', 'In photo view: camera closer / farther · roll'],
+  ['Hold Alt', 'In photo view: 4× finer movement (pad, keys, Align drag, zoom, pan)'],
   ['Enter', 'Finish face · create triangulated point · face from selected points'],
   ['Esc', 'Cancel tool → leave photo view → clear selection'],
   ['Del / Backspace', 'Delete selection'],
@@ -1079,6 +1149,7 @@ const SHORTCUTS = [
   ['1 2 3 4', 'Top · front · right · 3D view'],
   ['S · G · I', 'Grid snapping · grid · import photos'],
   ['Shift / Alt while drawing', 'Lock to axis / ignore grid snap'],
+  ['Start a line on a face', 'The whole line / face stays on that face’s plane (Esc ends it)'],
 ];
 function showHelp() {
   const body = h('div', {},
@@ -1132,6 +1203,14 @@ function onKey(e) {
     else if (kl === 'g') { e.preventDefault(); A.groupSelection(); }
     else if (kl === 'd') { e.preventDefault(); A.duplicate(); }
     return;
+  }
+  // Photo view: nudge the camera (arrows = pad mode, Shift+arrows = the other mode, PgUp/PgDn = closer/farther, , . = roll)
+  if (vp.activeCam) {
+    const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+    const mode = ui.padMode ? ui.padMode() : 'orbit';
+    if (arrows[k]) { e.preventDefault(); A.nudge(e.shiftKey ? (mode === 'orbit' ? 'pan' : 'orbit') : mode, ...arrows[k]); return; }
+    if (k === 'PageUp' || k === 'PageDown') { e.preventDefault(); A.nudge('dolly', k === 'PageUp' ? 1 : -1, 0); return; }
+    if (k === ',' || k === '.') { e.preventDefault(); A.nudge('roll', k === '.' ? 1 : -1, 0); return; }
   }
   if (e.altKey) return;
   const tools = P3.tools;
@@ -1213,7 +1292,69 @@ function bind() {
 
   $('#projectName').addEventListener('change', e => { P3.project.name = e.target.value.trim() || 'Untitled project'; e.target.value = P3.project.name; P3.io.scheduleAutosave(); updateHistoryButtons(); });
 
-  $('#hudPlane').addEventListener('change', e => P3.setSetting('workPlane', e.target.value));
+  $('#hudPlane').addEventListener('change', e => {
+    if (e.target.value === 'custom' && !P3.settings.customPlane) { e.target.value = P3.settings.workPlane; return A.planeFromSelection(); }
+    P3.setSetting('workPlane', e.target.value);
+  });
+
+  // camera nudge pad (press and hold to repeat)
+  let padMode = 'orbit';
+  document.querySelectorAll('[data-padmode]').forEach(b => b.addEventListener('click', () => {
+    padMode = b.dataset.padmode;
+    document.querySelectorAll('[data-padmode]').forEach(x => x.classList.toggle('on', x === b));
+  }));
+  const doNudge = code => {
+    const s = code[1] === '+' ? 1 : -1;
+    if (code[0] === 'x') A.nudge(padMode, s, 0);
+    else if (code[0] === 'y') A.nudge(padMode, 0, s);
+    else if (code[0] === 'd') A.nudge('dolly', s, 0);
+    else if (code[0] === 'r') A.nudge('roll', s, 0);
+  };
+  let rep = null;
+  const stopRep = () => { if (rep) { clearTimeout(rep.t); clearInterval(rep.i); rep.b.classList.remove('pressing'); rep = null; } };
+  document.querySelectorAll('[data-nudge]').forEach(b => {
+    b.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      stopRep();
+      b.classList.add('pressing');
+      doNudge(b.dataset.nudge);
+      rep = { b, t: setTimeout(() => { rep.i = setInterval(() => doNudge(b.dataset.nudge), 45); }, 320) };
+    });
+  });
+  window.addEventListener('pointerup', stopRep);
+  window.addEventListener('pointercancel', stopRep);
+  window.addEventListener('blur', stopRep);
+  ui.padMode = () => padMode;
+
+  // photo banner: collapse (remembered) + drag by its title so it never has to cover the photo
+  const banner = $('#camBanner');
+  if (localStorage.getItem('p3.bannerCollapsed') === '1') banner.classList.add('collapsed');
+  $('#cbMore').addEventListener('click', () => {
+    banner.classList.toggle('collapsed');
+    localStorage.setItem('p3.bannerCollapsed', banner.classList.contains('collapsed') ? '1' : '0');
+    $('#cbMore').blur();
+  });
+  let bDrag = null;
+  $('.cb-title').addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const r = banner.getBoundingClientRect(), w = vp.wrap().getBoundingClientRect();
+    bDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top, w };
+    banner.classList.add('moved');
+    Object.assign(banner.style, { left: r.left - w.left + 'px', top: r.top - w.top + 'px', bottom: 'auto', right: 'auto' });
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', e => {
+    if (!bDrag) return;
+    const w = bDrag.w, r = banner.getBoundingClientRect();
+    banner.style.left = U.clamp(e.clientX - w.left - bDrag.dx, 0, w.width - r.width) + 'px';
+    banner.style.top = U.clamp(e.clientY - w.top - bDrag.dy, 0, w.height - r.height) + 'px';
+  });
+  window.addEventListener('pointerup', () => { bDrag = null; });
+  $('.cb-title').addEventListener('dblclick', () => { banner.classList.remove('moved'); banner.removeAttribute('style'); });
+  window.addEventListener('resize', () => { if (banner.classList.contains('moved')) { banner.classList.remove('moved'); banner.removeAttribute('style'); } });
+  $('.cb-title').title = 'Drag to move this panel · double-click to put it back';
+  P3.on('finemode', on => { const el = $('#cbFine'); el.classList.toggle('fine', on); el.textContent = on ? 'FINE steps (Alt)' : 'hold to repeat · Alt = fine'; });
   $('#hudOffset').addEventListener('change', e => { const n = parseFloat(e.target.value); P3.setSetting('workPlaneOffset', Number.isFinite(n) ? n : 0); });
 
   $('#cbOpacity').addEventListener('input', e => { P3.settings.overlayOpacity = +e.target.value; vp.positionOverlay(); });

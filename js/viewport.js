@@ -108,7 +108,7 @@ vp.init = () => {
     if (!(info && info.live)) vp.updateGizmo();
   });
   P3.on('selection', () => { vp.rebuild(); vp.updateGizmo(); });
-  P3.on('settings', () => { applyTheme(); buildGrid(); vp.rebuild(); vp.rebuildCloud(); vp.layout(); });
+  P3.on('settings', () => { applyTheme(); buildGrid(); vp.rebuild(); vp.rebuildCloud(); vp.layout(); applyControlSpeeds(); });
   P3.on('cloud', () => vp.rebuildCloud());
 
   applyTheme();
@@ -131,6 +131,26 @@ function loop() {
   render();
 }
 function orbitAllowed() { return !vp.activeCam || vp.alignMode; }
+
+/* Movement speed: in Align mode orbit / pan / zoom are scaled by the "photo view movement speed"
+   setting; holding Alt makes every photo-view movement 4× finer. */
+let fineMode = false;
+vp.photoSpeed = () => U.clamp(+P3.settings.photoMoveSpeed || 0.5, 0.05, 2) * (fineMode ? 0.25 : 1);
+function applyControlSpeeds() {
+  if (!controls) return;
+  const align = !!(vp.activeCam && vp.alignMode);
+  const k = align ? vp.photoSpeed() : 1;
+  controls.rotateSpeed = align ? 0.5 * k : 1;
+  controls.panSpeed = align ? 0.6 * k : 1;
+  controls.zoomSpeed = align ? 0.5 * k : 1;
+  controls.zoomToCursor = !align;
+}
+vp.applyControlSpeeds = applyControlSpeeds;
+function setFine(on) { if (fineMode !== on) { fineMode = on; applyControlSpeeds(); P3.emit('finemode', on); } }
+window.addEventListener('keydown', e => { if (e.key === 'Alt') { if (vp.activeCam) e.preventDefault(); setFine(true); } });
+window.addEventListener('keyup', e => { if (e.key === 'Alt') { e.preventDefault(); setFine(false); } });
+window.addEventListener('blur', () => setFine(false));
+vp.fineMode = () => fineMode;
 
 function applyTheme() {
   const st = P3.settings;
@@ -177,10 +197,10 @@ function buildGrid() {
   grid.material.transparent = true;
   grid.material.opacity = 0.8;
   grid.material.depthWrite = false;
-  const off = +st.workPlaneOffset || 0;
-  if (st.workPlane === 'XY') { grid.rotation.x = Math.PI / 2; grid.position.z = off; }
-  else if (st.workPlane === 'YZ') { grid.rotation.z = Math.PI / 2; grid.position.x = off; }
-  else grid.position.y = off;
+  const fr = vp.planeFrame();
+  grid.matrixAutoUpdate = false;
+  grid.matrix.makeBasis(fr.u, fr.n, fr.v).setPosition(fr.o);
+  if (st.workPlane === 'custom') grid.material.opacity = 0.95;
   grid.visible = st.showGrid;
   grid.renderOrder = -1;
   scene.add(grid);
@@ -192,13 +212,27 @@ function buildGrid() {
   vp.requestRender();
 }
 
-vp.workPlane = () => {
+/** Work plane as a frame: origin o, normal n and in-plane axes u, v (u × n = v). */
+vp.planeFrame = () => {
   const st = P3.settings;
-  const off = +st.workPlaneOffset || 0;
-  const n = st.workPlane === 'XY' ? new T.Vector3(0, 0, 1) : st.workPlane === 'YZ' ? new T.Vector3(1, 0, 0) : new T.Vector3(0, 1, 0);
-  return new T.Plane(n, -off);
+  let o = new T.Vector3(), n, u;
+  const cp = st.customPlane;
+  if (st.workPlane === 'custom' && cp && cp.n) {
+    o.fromArray(cp.o);
+    n = new T.Vector3().fromArray(cp.n).normalize();
+    u = new T.Vector3().fromArray(cp.u || [1, 0, 0]);
+    u.addScaledVector(n, -u.dot(n));
+    if (u.lengthSq() < 1e-8) u = Math.abs(n.x) < 0.9 ? new T.Vector3(1, 0, 0).cross(n) : new T.Vector3(0, 1, 0).cross(n);
+    u.normalize();
+  } else if (st.workPlane === 'XY') { n = new T.Vector3(0, 0, 1); u = new T.Vector3(1, 0, 0); }
+  else if (st.workPlane === 'YZ') { n = new T.Vector3(1, 0, 0); u = new T.Vector3(0, 1, 0); }
+  else { n = new T.Vector3(0, 1, 0); u = new T.Vector3(1, 0, 0); }
+  o.addScaledVector(n, +st.workPlaneOffset || 0);
+  const v = u.clone().cross(n);
+  return { o, n, u, v, plane: new T.Plane().setFromNormalAndCoplanarPoint(n, o) };
 };
-vp.planeAxis = () => ({ XY: 'z', YZ: 'x' }[P3.settings.workPlane] || 'y');
+vp.workPlane = () => vp.planeFrame().plane;
+vp.planeAxis = () => ({ XY: 'z', YZ: 'x', XZ: 'y' }[P3.settings.workPlane] || null);
 
 /* ================================================================== layout & render */
 vp.layout = () => {
@@ -312,19 +346,22 @@ function bindPhotoZoom() {
     if (!vp.photoZoomable()) return;
     e.preventDefault();
     const l = vp.local(e);
-    vp.zoomPhotoAt(l.x, l.y, Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0016)));
+    const k = (e.deltaMode === 1 ? 0.05 : 0.0016) * vp.photoSpeed() * (e.altKey && !fineMode ? 0.25 : 1);
+    vp.zoomPhotoAt(l.x, l.y, Math.exp(-U.clamp(e.deltaY, -240, 240) * k));
   }, { passive: false });
   let pan = null;
   el.addEventListener('pointerdown', e => {
     if (!vp.photoZoomable() || (e.button !== 1 && e.button !== 2)) return;
-    pan = { x: e.clientX, y: e.clientY, ox: vp.pz.ox, oy: vp.pz.oy };
+    pan = { x: e.clientX, y: e.clientY, ox: vp.pz.ox, oy: vp.pz.oy, lx: e.clientX, ly: e.clientY };
     if (e.button === 1) e.preventDefault();
   });
   window.addEventListener('pointermove', e => {
     if (!pan) return;
-    const r = vp.viewRect;
-    vp.pz.ox = pan.ox - (e.clientX - pan.x) / (r.w * vp.pz.z);
-    vp.pz.oy = pan.oy - (e.clientY - pan.y) / (r.h * vp.pz.z);
+    // Incremental, speed-scaled pan so changing Alt mid-drag doesn't jump.
+    const r = vp.viewRect, k = vp.photoSpeed();
+    vp.pz.ox -= ((e.clientX - pan.lx) * k) / (r.w * vp.pz.z);
+    vp.pz.oy -= ((e.clientY - pan.ly) * k) / (r.h * vp.pz.z);
+    pan.lx = e.clientX; pan.ly = e.clientY;
     applyPhotoZoom();
   });
   window.addEventListener('pointerup', () => { pan = null; });
@@ -651,17 +688,34 @@ vp.pickCloud = e => {
   return best >= 0 ? new T.Vector3(P[best] * k, P[best + 1] * k, P[best + 2] * k) : null;
 };
 
-vp.planePoint = (e, snap = true) => {
+/** Intersection of the mouse ray with a plane frame (default: the work plane), optionally grid-snapped in that plane. */
+vp.planePoint = (e, snap = true, frame = null) => {
+  const fr = frame || vp.planeFrame();
   raycaster.setFromCamera(vp.ndc(e), camera);
   const p = new T.Vector3();
-  if (!raycaster.ray.intersectPlane(vp.workPlane(), p)) return null;
+  if (!raycaster.ray.intersectPlane(fr.plane, p)) return null;
   if (p.distanceTo(camera.position) > camera.far * 0.9) return null;
   if (snap && P3.settings.snapToGrid) {
     const step = Math.max(1e-6, +P3.settings.snapStep || 0.25);
-    const ax = vp.planeAxis();
-    for (const k of ['x', 'y', 'z']) if (k !== ax) p[k] = Math.round(p[k] / step) * step;
+    const d = p.clone().sub(fr.o);
+    const a = Math.round(d.dot(fr.u) / step) * step, b = Math.round(d.dot(fr.v) / step) * step;
+    p.copy(fr.o).addScaledVector(fr.u, a).addScaledVector(fr.v, b);
   }
   return p;
+};
+
+/** Plane frame through a face (origin = face centroid, u along its first edge). */
+vp.faceFrame = fid => {
+  const f = idx.f.get(fid);
+  if (!f) return null;
+  const pts = f.v.map(id => P3.model.vpos(id));
+  const n = P3.geom.normal(pts);
+  if (n.lengthSq() < 0.5) return null;
+  const o = pts.reduce((a, p) => a.add(p), new T.Vector3()).divideScalar(pts.length);
+  const u = pts[1].clone().sub(pts[0]);
+  u.addScaledVector(n, -u.dot(n)).normalize();
+  const v = u.clone().cross(n);
+  return { o, n, u, v, plane: new T.Plane().setFromNormalAndCoplanarPoint(n, o), faceId: fid };
 };
 
 /* ================================================================== photo camera view */
@@ -697,6 +751,7 @@ vp.enterCamera = id => {
   if (switching) vp.pz = { z: 1, ox: 0, oy: 0 };
   applyImageToCamera(img);
   controls.enabled = orbitAllowed();
+  applyControlSpeeds();
   vp.layout();
   vp.rebuild();
   vp.updateGizmo();
@@ -715,6 +770,7 @@ vp.exitCamera = () => {
   }
   camera.up.set(0, 1, 0);
   controls.enabled = true;
+  applyControlSpeeds();
   controls.update();
   vp.layout();
   vp.rebuild();
@@ -735,10 +791,59 @@ vp.setAlign = on => {
   vp.alignMode = !!on;
   if (vp.alignMode) vp.pz = { z: 1, ox: 0, oy: 0 };
   controls.enabled = orbitAllowed();
+  applyControlSpeeds();
   if (vp.activeCam) { applyImageToCamera(idx.c.get(vp.activeCam)); vp.layout(); }
   P3.emit('view');
   P3.emit('photozoom');
 };
+/**
+ * Nudge the active photo camera in small steps (pad buttons / arrow keys).
+ * kind: 'orbit' (dx,dy = around the model), 'pan' (sideways / up), 'dolly' (closer / farther), 'roll'.
+ * Step sizes scale with the movement-speed setting; Alt makes them 4× finer.
+ */
+const commitNudge = U.debounce(() => P3.history.commit('Adjust photo camera'), 600);
+vp.nudgeCamera = (kind, dx = 0, dy = 0) => {
+  const img = vp.activeCam && idx.c.get(vp.activeCam);
+  if (!img) return;
+  const k = vp.photoSpeed() * 2; // default speed 0.5 → 1× base step
+  const target = controls.target;
+  const dist = Math.max(0.05, camera.position.distanceTo(target));
+  const fwd = new T.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const right = new T.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const up = new T.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  if (kind === 'orbit') {
+    const a = 0.5 * D2R * k;
+    const q = new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 1, 0), dx * a)
+      .multiply(new T.Quaternion().setFromAxisAngle(right, -dy * a));
+    const off = camera.position.clone().sub(target).applyQuaternion(q);
+    camera.position.copy(target).add(off);
+    camera.quaternion.premultiply(q);
+  } else if (kind === 'pan') {
+    const d = right.multiplyScalar(dx * dist * 0.005 * k).add(up.multiplyScalar(dy * dist * 0.005 * k));
+    camera.position.add(d);
+    target.add(d);
+  } else if (kind === 'dolly') {
+    const step = Math.min(dist * 0.01 * k * dx, dist - 0.05);
+    camera.position.addScaledVector(fwd, step);
+  } else if (kind === 'roll') {
+    camera.quaternion.multiply(new T.Quaternion().setFromAxisAngle(new T.Vector3(0, 0, 1), -dx * 0.25 * D2R * k));
+  }
+  camera.updateMatrixWorld();
+  P3.cam.setFromObject(img, camera);
+  P3.touch({ source: 'align' });
+  vp.requestRender();
+  commitNudge();
+};
+
+/** Put a photo camera where the 3D view currently is (same position, direction and FOV ratio kept). */
+vp.cameraFromView = id => {
+  const img = idx.c.get(id);
+  if (!img || vp.activeCam) return false;
+  camera.updateMatrixWorld();
+  P3.cam.setFromObject(img, camera);
+  return true;
+};
+
 vp.toggleOverlay = () => { vp.overlayHidden = !vp.overlayHidden; positionOverlay(); vp.requestRender(); P3.emit('view'); };
 
 function onControlsChange() {
@@ -845,6 +950,7 @@ vp.updateGizmo = () => {
     pivot.quaternion.copy(P3.cam.quat(img));
     pivot.scale.set(1, 1, 1);
     pivot.userData = { kind: 'cam', id: img.id };
+    tc.setSize(1.25);
     tc.setMode(vp.gizmoMode === 'scale' ? 'translate' : vp.gizmoMode);
     tc.setSpace(vp.gizmoMode === 'rotate' ? 'local' : 'world');
     tc.attach(pivot);
@@ -853,6 +959,7 @@ vp.updateGizmo = () => {
     pivot.quaternion.identity();
     pivot.scale.set(1, 1, 1);
     pivot.userData = { kind: 'verts', ids: vids };
+    tc.setSize(0.9);
     tc.setMode(vids.length === 1 && vp.gizmoMode !== 'translate' ? 'translate' : vp.gizmoMode);
     tc.setSpace('world');
     tc.attach(pivot);
