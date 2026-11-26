@@ -57,6 +57,10 @@
   <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
   <symbol id="i-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
   <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></symbol>
+  <symbol id="i-feature" viewBox="0 0 24 24"><path d="M4 18L18 6"/><path d="M14 6h4v4"/><circle cx="4.5" cy="17.5" r="2"/><path d="M8 20h12" opacity=".5"/></symbol>
+  <symbol id="i-axis" viewBox="0 0 24 24"><path d="M3 12h16"/><path d="M15 7.5l4.5 4.5-4.5 4.5"/><circle cx="4" cy="12" r="1.6"/></symbol>
+  <symbol id="i-span" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M5 7v10M19 7v10"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/></symbol>
   <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 14.5l6-6 6 6"/></symbol>
   <symbol id="i-roll-l" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4.5 4v4.5H9"/></symbol>
   <symbol id="i-roll-r" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4.5H15"/></symbol>
@@ -98,6 +102,9 @@
           <button data-action="importImages"><svg class="ic"><use href="#i-image"/></svg>Photos…<kbd>I</kbd></button>
           <button data-action="importCloud"><svg class="ic"><use href="#i-cloud"/></svg>Point cloud (.ply .xyz .txt .csv .pts)…</button>
           <button data-action="importObj"><svg class="ic"><use href="#i-cube"/></svg>OBJ model…</button>
+          <button data-action="importSplat"><svg class="ic"><use href="#i-sparkle"/></svg>Gaussian splat (.ply .splat)…</button>
+          <button data-action="importColmap"><svg class="ic"><use href="#i-camera"/></svg>COLMAP cameras + points (.txt)…</button>
+          <button data-action="importFeatureSet"><svg class="ic"><use href="#i-feature"/></svg>Feature set (.features.json)…</button>
           <div class="menu-sep"></div>
           <button data-action="demo"><svg class="ic"><use href="#i-sparkle"/></svg>Load demo project</button>
         </div>
@@ -131,10 +138,31 @@
           <h3 class="collapser"><svg class="ic chev"><use href="#i-down"/></svg>Photos <span class="count" id="imgCount">0</span></h3>
           <div class="head-actions">
             <button class="small" data-action="importImages" title="Import photos (I)"><svg class="ic"><use href="#i-import"/></svg>Add</button>
-            <button class="small" data-action="arrange" title="Place cameras in a ring around the object">Arrange</button>
+            <button class="small primary" data-action="startMarking" title="Mark lines and points in each photo; cameras are solved automatically (J)"><svg class="ic"><use href="#i-feature"/></svg>Start marking</button>
           </div>
         </div>
         <div class="section-body"><div id="imageList" class="list"></div></div>
+      </section>
+      <section class="panel-section" data-section="features">
+        <div class="section-head">
+          <h3 class="collapser"><svg class="ic chev"><use href="#i-down"/></svg>Features <span class="count" id="featCount">0</span></h3>
+          <div class="head-actions">
+            <div class="dropdown">
+              <button class="small" data-action="menu" data-arg="featMenu" title="Add a feature to mark in every photo"><svg class="ic"><use href="#i-feature"/></svg>Add</button>
+              <div class="dropdown-menu" id="featMenu">
+                <div class="menu-label">Add a feature to mark in each photo</div>
+                <button data-action="addFeature" data-arg="axis"><svg class="ic"><use href="#i-axis"/></svg>Direction (tail → nose)</button>
+                <button data-action="addFeature" data-arg="line"><svg class="ic"><use href="#i-span"/></svg>Line (left end → right end)</button>
+                <button data-action="addFeature" data-arg="point"><svg class="ic"><use href="#i-dot"/></svg>Point</button>
+                <div class="menu-sep"></div>
+                <button data-action="exportFeatureSet"><svg class="ic"><use href="#i-export"/></svg>Save feature set…</button>
+                <button data-action="importFeatureSet"><svg class="ic"><use href="#i-import"/></svg>Load feature set…</button>
+              </div>
+            </div>
+            <button class="small primary" data-action="solveFeatures" title="Solve every camera and the shape from the marked features"><svg class="ic"><use href="#i-solve"/></svg>Solve</button>
+          </div>
+        </div>
+        <div class="section-body"><div id="featureList" class="list"></div></div>
       </section>
       <section class="panel-section" data-section="objects">
         <div class="section-head">
@@ -166,6 +194,7 @@
         <div class="tb-sep"></div>
         <button data-tool="triangulate" title="Triangulate from photos (T)"><svg class="ic"><use href="#i-tri"/></svg></button>
         <button data-tool="match" title="Pin points in photos (K)"><svg class="ic"><use href="#i-pin"/></svg></button>
+        <button data-tool="mark" title="Mark features in photos (J)"><svg class="ic"><use href="#i-feature"/></svg></button>
         <div id="gizmoModes">
           <div class="tb-sep"></div>
           <button data-gizmo="translate" title="Move gizmo (W)"><svg class="ic"><use href="#i-move"/></svg></button>
@@ -232,6 +261,30 @@
         </div>
       </div>
 
+      <div id="markRef" class="floating hidden">
+        <div class="mr-head">
+          <button class="icon-btn ghost" id="mrPrev" title="Previous reference photo"><svg class="ic"><use href="#i-left"/></svg></button>
+          <div class="mr-title"><span class="muted">Reference</span> <b id="mrName"></b> <span id="mrCount" class="muted"></span></div>
+          <button class="icon-btn ghost" id="mrNext" title="Next reference photo"><svg class="ic"><use href="#i-right"/></svg></button>
+          <button class="icon-btn ghost" id="mrToggle" title="Show / hide the reference photo"><svg class="ic chev"><use href="#i-down"/></svg></button>
+        </div>
+        <canvas id="mrCanvas" title="Click to open this photo"></canvas>
+        <div id="mrNote" class="mr-note muted"></div>
+      </div>
+
+      <div id="markBar" class="floating hidden">
+        <div class="mb-row">
+          <div id="mbChips" class="mb-chips"></div>
+          <button class="small ghost" id="mbAdd" title="Add a line, direction or point to mark"><svg class="ic"><use href="#i-feature"/></svg>+ Add</button>
+          <span class="spacer"></span>
+          <span id="mbStatus" class="chip"></span>
+          <button class="small toggle" id="mbModel" title="Show the solved model behind the photo"><svg class="ic"><use href="#i-cube"/></svg>Model</button>
+          <button class="small primary" data-action="solveFeatures" title="Full solve (also tries harder starting shapes)"><svg class="ic"><use href="#i-solve"/></svg>Solve</button>
+          <button class="small" data-action="exitCamera" title="Back to the 3D view (Esc)"><svg class="ic"><use href="#i-cube"/></svg>3D view</button>
+        </div>
+        <div id="mbStrip" class="mb-strip"></div>
+      </div>
+
       <div id="emptyState" class="hidden">
         <div class="card">
           <div class="hero-icon"><svg class="ic"><use href="#i-cube"/></svg></div>
@@ -239,9 +292,9 @@
           <p class="muted">Place your photos as cameras around the object, draw and triangulate its shape, and check it against every photo.</p>
           <ol class="steps">
             <li><b>Import</b> photos of one object from several sides.</li>
-            <li><b>Position</b> the cameras: Arrange, gizmo, Align or Solve from pins.</li>
-            <li><b>Model</b> with points, lines and faces — or triangulate from two photos.</li>
-            <li><b>Check</b> any photo overlaid on the model, then <b>export</b>.</li>
+            <li><b>Mark</b> the same 2–3 lines and a point in each photo — colour-coded, with the previous photo shown for reference.</li>
+            <li>Cameras and shape are <b>solved automatically</b> — no placing photos by hand.</li>
+            <li>Model on top, check every photo overlaid, then <b>export</b>.</li>
           </ol>
           <div class="row">
             <button class="primary" data-action="importImages"><svg class="ic"><use href="#i-import"/></svg>Import photos</button>
@@ -279,7 +332,10 @@
 
 <input type="file" id="fileImages" accept="image/*" multiple hidden>
 <input type="file" id="fileProject" accept=".json,application/json" hidden>
-<input type="file" id="fileCloud" accept=".ply,.xyz,.txt,.csv,.pts" hidden>
+<input type="file" id="fileCloud" accept=".ply,.xyz,.txt,.csv,.pts,.splat" hidden>
+<input type="file" id="fileSplat" accept=".ply,.splat,.ksplat,.spz" hidden>
+<input type="file" id="fileColmap" accept=".txt" multiple hidden>
+<input type="file" id="fileFeatures" accept=".json,application/json" hidden>
 <input type="file" id="fileObj" accept=".obj" hidden>
 
 <div id="bootMsg"><div class="boot-card"><svg class="logo spin" viewBox="0 0 32 32"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="url(#brandGrad)"/></svg><div>Loading 3D engine…</div></div></div>
@@ -305,7 +361,7 @@
       s.src = src; s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
       document.body.appendChild(s);
     });
-    for (const src of ['core', 'solve', 'viewport', 'photoview', 'tools', 'io', 'demo', 'ui']) await load('js/' + src + '.js');
+    for (const src of ['core', 'solve', 'viewport', 'photoview', 'tools', 'io', 'demo', 'markview', 'ui']) await load('js/' + src + '.js');
     await window.P3.ui.init();
     document.getElementById('bootMsg').remove();
   } catch (err) {

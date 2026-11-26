@@ -3,7 +3,7 @@
 'use strict';
 const T = window.THREE;
 const P3 = (window.P3 = {});
-P3.VERSION = '2.0.0';
+P3.VERSION = '2.1.0';
 
 /* ------------------------------------------------------------------ events */
 const listeners = {};
@@ -51,7 +51,8 @@ const U = (P3.util = {
   },
   safeName: s => (String(s || 'project').replace(/[^\w\-. ]+/g, '-').replace(/\s*-+\s*/g, '-').replace(/^-+|-+$/g, '').trim() || 'project'),
   ext: name => (String(name).match(/\.([^.]+)$/) || [, ''])[1].toLowerCase(),
-  nextFrame: () => new Promise(r => requestAnimationFrame(() => r())),
+  // Yield so the UI can paint. Hidden / background pages may pause animation frames, so a timer also resolves it.
+  nextFrame: () => new Promise(r => { let done = false; const go = () => { if (!done) { done = true; r(); } }; requestAnimationFrame(go); setTimeout(go, 50); }),
   /** Format a length with the project unit. */
   len: (v, d = 3) => U.fmt(v, d) + (P3.settings.units && P3.settings.units !== 'units' ? ' ' + P3.settings.units : ''),
 });
@@ -88,6 +89,7 @@ const DEFAULTS = (P3.DEFAULT_SETTINGS = {
   workPlaneOffset: 0,
   customPlane: null, // {o:[x,y,z], n:[x,y,z], u:[x,y,z]} when workPlane === 'custom'
   stickToFace: true,
+  autoSolve: true,
   photoMoveSpeed: 0.5,
   defaultFov: 50,
   useExifFov: true,
@@ -118,7 +120,9 @@ P3.resetSettings = () => {
    Everything inside P3.state is plain JSON and is what undo/redo snapshots.
    Image pixels live in P3.images (id -> {src, el, thumb, texEl}) and are never part of history.
    img.pins = [{v: vertexId, x, y}] — where vertex v appears in this photo (x, y normalised 0..1, y down). */
-P3.blankState = () => ({ nextId: 1, images: [], vertices: [], edges: [], faces: [], objects: [], cloudScale: 1 });
+P3.blankState = () => ({ nextId: 1, images: [], vertices: [], edges: [], faces: [], objects: [], features: [], cloudMatrix: null });
+/** Point-cloud placement in the scene (similarity transform, undoable because it lives in state). */
+P3.cloudMatrix = () => (P3.state.cloudMatrix ? new T.Matrix4().fromArray(P3.state.cloudMatrix) : new T.Matrix4());
 P3.state = P3.blankState();
 P3.images = new Map();
 P3.cloud = null; // {name, positions:Float32Array, colors:Float32Array|null, visible}
@@ -146,7 +150,10 @@ P3.normalizeState = st => {
   const s = Object.assign(P3.blankState(), st);
   s.images.forEach(i => { i.pins ||= []; if (i.visible === undefined) i.visible = true; i.rot ||= [0, 0, 0]; i.pos ||= [0, 0, 0]; });
   s.objects.forEach(o => { o.faces ||= []; o.edges ||= []; if (o.visible === undefined) o.visible = true; });
-  if (!(s.cloudScale > 0)) s.cloudScale = 1;
+  s.features ||= [];
+  if (!s.cloudMatrix && s.cloudScale > 0 && s.cloudScale !== 1) s.cloudMatrix = new T.Matrix4().makeScale(s.cloudScale, s.cloudScale, s.cloudScale).toArray();
+  delete s.cloudScale;
+  if (!s.cloudMatrix) s.cloudMatrix = null;
   const maxId = Math.max(0, ...s.vertices.map(v => v.id), ...s.edges.map(e => e.id), ...s.faces.map(f => f.id), ...s.images.map(i => i.id), ...s.objects.map(o => o.id));
   s.nextId = Math.max(s.nextId || 1, maxId + 1);
   return s;
@@ -155,7 +162,7 @@ P3.normalizeState = st => {
 /* ------------------------------------------------------------------ index */
 const idx = (P3.idx = {
   v: new Map(), e: new Map(), f: new Map(), c: new Map(), o: new Map(),
-  edgeKey: new Map(), faceObj: new Map(), edgeObj: new Map(), pins: new Map(),
+  edgeKey: new Map(), faceObj: new Map(), edgeObj: new Map(), pins: new Map(), feat: new Map(), featOf: new Map(), unsolved: new Set(),
   hidden: { v: new Set(), e: new Set(), f: new Set() },
 });
 const ekey = (a, b) => (a < b ? a + '_' + b : b + '_' + a);
@@ -163,7 +170,7 @@ P3.edgeKey = ekey;
 
 P3.reindex = () => {
   const s = P3.state;
-  for (const k of ['v', 'e', 'f', 'c', 'o', 'edgeKey', 'faceObj', 'edgeObj', 'pins']) idx[k].clear();
+  for (const k of ['v', 'e', 'f', 'c', 'o', 'edgeKey', 'faceObj', 'edgeObj', 'pins', 'feat', 'featOf', 'unsolved']) idx[k].clear();
   s.vertices.forEach(v => idx.v.set(v.id, v));
   s.edges.forEach(e => { idx.e.set(e.id, e); idx.edgeKey.set(ekey(e.a, e.b), e); });
   s.faces.forEach(f => idx.f.set(f.id, f));
@@ -203,6 +210,17 @@ P3.reindex = () => {
     f.v.forEach(v => mark(v, vis));
   }
   for (const [vid, vis] of use) if (!vis) H.v.add(vid);
+  // Features: drop ones whose points were deleted; points of unsolved features are hidden until solved.
+  s.features = (s.features || []).filter(f => idx.v.has(f.a) && (f.kind === 'point' || idx.v.has(f.b)));
+  for (const f of s.features) {
+    idx.feat.set(f.id, f);
+    idx.featOf.set(f.a, { f, end: 'a' });
+    if (f.kind !== 'point') idx.featOf.set(f.b, { f, end: 'b' });
+    if (!f.solved) { idx.unsolved.add(f.a); if (f.kind !== 'point') idx.unsolved.add(f.b); }
+  }
+  for (const v of idx.unsolved) H.v.add(v);
+  for (const e of s.edges) if (idx.unsolved.has(e.a) || idx.unsolved.has(e.b)) H.e.add(e.id);
+  for (const f of s.faces) if (f.v.some(v => idx.unsolved.has(v))) H.f.add(f.id);
   idx.hidden = H;
 };
 
@@ -263,6 +281,14 @@ const H = (P3.history = {
     }
     if (sel.prune()) P3.emit('selection');
     P3.emit('change', { live: false, label });
+    P3.emit('history');
+  },
+  /** Fold the current state into the latest undo step (e.g. auto-solve right after a mark). */
+  amend() {
+    P3.reindex();
+    this.current = this.snap();
+    if (sel.prune()) P3.emit('selection');
+    P3.emit('change', { live: false, label: 'amend' });
     P3.emit('history');
   },
   undo() {
@@ -574,12 +600,69 @@ const M = (P3.model = {
     return tops.filter(Boolean);
   },
 
+  /** Apply a similarity transform (rotation + uniform scale + translation) to points, cameras and the cloud. */
+  transformScene(m) {
+    const s = S();
+    const pos = new T.Vector3(), q = new T.Quaternion(), sc = new T.Vector3();
+    m.decompose(pos, q, sc);
+    s.vertices.forEach(v => { v.p = new T.Vector3().fromArray(v.p).applyMatrix4(m).toArray().map(n => U.round(n, 6)); });
+    s.images.forEach(img => {
+      const p = cam.position(img).applyMatrix4(m);
+      cam.setPose(img, p, q.clone().multiply(cam.quat(img)));
+    });
+    s.cloudMatrix = m.clone().multiply(P3.cloudMatrix()).toArray();
+  },
+
+  /* ---------------- features (named points / lines / directions marked in photos) ---------------- */
+  FEATURE_COLORS: ['#ff5d8f', '#4fc3f7', '#ffd166', '#7bd88f', '#c792ea', '#ff9f1c', '#57d9c5', '#f78c6c'],
+  /** Template position used before a feature is solved: X = forward (tail → nose), Y = up, Z = right. */
+  featureTemplate(kind, i) {
+    if (kind === 'axis') return [new T.Vector3(0, 0, 0), new T.Vector3(1, 0, 0)];
+    if (kind === 'line') { const x = [0.15, 0.6, 0.35, 0.85, 0.5][i % 5], w = 0.5 - 0.06 * (i % 3); return [new T.Vector3(x, 0.02 * i, -w), new T.Vector3(x, 0.02 * i, w)]; }
+    return [new T.Vector3(0.3 + 0.13 * (i % 5), 0.15 + 0.05 * (i % 3), 0.07 * ((i % 3) - 1))];
+  },
+  addFeature(kind, name, opts = {}) {
+    const s = S();
+    const same = s.features.filter(f => f.kind === kind).length;
+    const tpl = M.featureTemplate(kind, same);
+    const a = M.addVertex(tpl[0]);
+    const b = kind === 'point' ? null : M.addVertex(tpl[1]);
+    if (b != null) M.addEdge(a, b);
+    const f = {
+      id: P3.newId(), name: name || ({ point: 'Point', line: 'Line', axis: 'Direction' }[kind] + ' ' + (same + 1)),
+      kind, a, b, solved: false,
+      color: opts.color || M.FEATURE_COLORS[s.features.length % M.FEATURE_COLORS.length],
+      ref: kind === 'axis' && !s.features.some(x => x.kind === 'axis' && x.ref),
+      length: opts.length || null,
+    };
+    s.features.push(f);
+    return f;
+  },
+  removeFeature(id) {
+    const s = S();
+    const f = s.features.find(x => x.id === id);
+    if (!f) return;
+    const vs = new Set([f.a, f.b].filter(v => v != null));
+    s.features = s.features.filter(x => x.id !== id);
+    s.vertices = s.vertices.filter(v => !vs.has(v.id));
+    s.edges = s.edges.filter(e => !vs.has(e.a) && !vs.has(e.b));
+    s.faces = s.faces.filter(fc => !fc.v.some(v => vs.has(v)));
+    s.images.forEach(img => { img.pins = (img.pins || []).filter(p => !vs.has(p.v)); });
+    if (f.ref) { const ax = s.features.find(x => x.kind === 'axis'); if (ax) ax.ref = true; }
+    M.cleanObjects();
+  },
+  /** How many photos a feature is fully marked in. */
+  featureMarks(f) {
+    const ends = f.kind === 'point' ? [f.a] : [f.a, f.b];
+    return P3.state.images.filter(img => ends.every(v => (img.pins || []).some(p => p.v === v))).length;
+  },
+
   /** Uniformly scale the whole scene (geometry, cameras, point cloud) about the origin. */
   scaleScene(k) {
     const s = S();
     s.vertices.forEach(v => { v.p = v.p.map(n => U.round(n * k, 6)); });
     s.images.forEach(i => { i.pos = i.pos.map(n => U.round(n * k, 6)); });
-    s.cloudScale = (s.cloudScale || 1) * k;
+    s.cloudMatrix = new T.Matrix4().makeScale(k, k, k).multiply(P3.cloudMatrix()).toArray();
   },
 
   groupSelection(name) {

@@ -244,10 +244,12 @@ vp.layout = () => {
   const img = vp.activeCam && idx.c.get(vp.activeCam);
   if (img) {
     const a = img.w / img.h;
-    const pad = 0;
-    if ((W - pad) / (H - pad) > a) { r.h = H - pad; r.w = r.h * a; } else { r.w = W - pad; r.h = r.w / a; }
-    r.x = (W - r.w) / 2;
-    r.y = (H - r.h) / 2;
+    // In marking mode keep the photo clear of the toolbar, reference card and bottom bar.
+    const ins = (P3.markview && P3.markview.insets && P3.markview.insets()) || { left: 0, right: 0, top: 0, bottom: 0 };
+    const bw = Math.max(50, W - ins.left - ins.right), bh = Math.max(50, H - ins.top - ins.bottom);
+    if (bw / bh > a) { r.h = bh; r.w = r.h * a; } else { r.w = bw; r.h = r.w / a; }
+    r.x = ins.left + (bw - r.w) / 2;
+    r.y = ins.top + (bh - r.h) / 2;
     camera.aspect = a;
   } else {
     camera.aspect = W / H;
@@ -298,7 +300,7 @@ function positionOverlay() {
     width: r.w * pz.z + 'px', height: r.h * pz.z + 'px',
     left: -pz.ox * r.w * pz.z + 'px', top: -pz.oy * r.h * pz.z + 'px',
   });
-  overlayEl.style.opacity = P3.settings.overlayOpacity;
+  overlayEl.style.opacity = P3.markview && P3.markview.photoOpaque() ? 1 : P3.settings.overlayOpacity;
   if (overlayEl.getAttribute('src') !== rec.src) overlayEl.src = rec.src;
   overlayWrap.classList.toggle('under', P3.settings.overlayMode === 'under');
   overlayWrap.classList.remove('hidden');
@@ -487,7 +489,7 @@ vp.rebuild = () => {
   rebuildCameras();
   if (grid) grid.visible = st.showGrid;
   if (axes) axes.visible = st.showAxes;
-  if (cloudObj) cloudObj.scale.setScalar(S().cloudScale || 1);
+  if (cloudObj) setCloudMatrix();
   vp.requestRender();
 };
 
@@ -545,6 +547,11 @@ function rebuildCameras() {
   }
 }
 
+function setCloudMatrix() {
+  cloudObj.matrixAutoUpdate = false;
+  cloudObj.matrix.copy(P3.cloudMatrix());
+  cloudObj.matrixWorldNeedsUpdate = true;
+}
 vp.rebuildCloud = () => {
   if (!renderer) return;
   clearGroup(cloudGroup);
@@ -558,7 +565,7 @@ vp.rebuildCloud = () => {
     size: (+P3.settings.cloudPointSize || 2) * renderer.getPixelRatio(), sizeAttenuation: false,
     vertexColors: !!c.colors, color: c.colors ? 0xffffff : 0x9fb4c8,
   }));
-  cloudObj.scale.setScalar(S().cloudScale || 1);
+  setCloudMatrix();
   cloudGroup.add(cloudObj);
   vp.requestRender();
 };
@@ -670,8 +677,8 @@ vp.pickCloud = e => {
   const c = P3.cloud;
   if (!c || c.visible === false || !c.positions.length || !vp.inView(e)) return null;
   camera.updateMatrixWorld();
-  const k = S().cloudScale || 1;
-  const m = new T.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(new T.Matrix4().makeScale(k, k, k)).elements;
+  const cm = P3.cloudMatrix();
+  const m = new T.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).multiply(cm).elements;
   const L = vp.local(e), r = vp.viewRect;
   const R = (+P3.settings.snapRadius || 12) * 0.7;
   const P = c.positions;
@@ -685,7 +692,7 @@ vp.pickCloud = e => {
     const d = Math.hypot(sx - L.x, sy - L.y);
     if (d < bd - 1.5 || (d < R && Math.abs(d - bd) <= 1.5 && w < bw)) { bd = Math.min(bd, d); best = i; bw = w; }
   }
-  return best >= 0 ? new T.Vector3(P[best] * k, P[best + 1] * k, P[best + 2] * k) : null;
+  return best >= 0 ? new T.Vector3(P[best], P[best + 1], P[best + 2]).applyMatrix4(cm) : null;
 };
 
 /** Intersection of the mouse ray with a plane frame (default: the work plane), optionally grid-snapped in that plane. */
@@ -724,7 +731,7 @@ function sceneCenter() {
   if (s.vertices.length) return P3.model.centroid(s.vertices.map(v => v.id));
   if (P3.cloud && P3.cloud.positions.length) {
     const b = new T.Box3().setFromBufferAttribute(new T.BufferAttribute(P3.cloud.positions, 3));
-    return b.getCenter(new T.Vector3()).multiplyScalar(s.cloudScale || 1);
+    return b.getCenter(new T.Vector3()).applyMatrix4(P3.cloudMatrix());
   }
   return new T.Vector3(0, 0, 0);
 }
@@ -884,9 +891,7 @@ vp.frame = (selectionOnly = false) => {
     S().images.forEach(i => box.expandByPoint(P3.cam.position(i)));
     if (P3.cloud && P3.cloud.visible !== false && P3.cloud.positions.length) {
       const b = new T.Box3().setFromBufferAttribute(new T.BufferAttribute(P3.cloud.positions, 3));
-      const k = S().cloudScale || 1;
-      b.min.multiplyScalar(k); b.max.multiplyScalar(k);
-      box.union(b);
+      box.union(b.applyMatrix4(P3.cloudMatrix()));
     }
   }
   if (box.isEmpty()) box.set(new T.Vector3(-2, 0, -2), new T.Vector3(2, 2, 2));

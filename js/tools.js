@@ -9,9 +9,9 @@ const M = P3.model;
 const idx = P3.idx;
 
 const tools = (P3.tools = { current: 'select', defs: {} });
-const st = { lineStart: null, facePts: [], rays: [], matchVid: null, lock: null };
+const st = { lineStart: null, facePts: [], rays: [], matchVid: null, lock: null, feature: null, markStart: null, markDrag: null };
 const RAY_COLORS = ['#ff6b6b', '#4fc3f7', '#7bd88f', '#ffd166', '#e06cff', '#57d9c5'];
-const TOOL_NAMES = { select: 'Select', point: 'Point', line: 'Line', face: 'Face', triangulate: 'Triangulate', match: 'Pin' };
+const TOOL_NAMES = { select: 'Select', point: 'Point', line: 'Line', face: 'Face', triangulate: 'Triangulate', match: 'Pin', mark: 'Mark features' };
 
 /* ------------------------------------------------------------------ helper visuals */
 let snapObj = null, previewObj = null, raysObj = null, solvedObj = null, lockObj = null;
@@ -371,6 +371,103 @@ tools.defs.match = {
 };
 tools.unlock = () => { if (!st.lock) return false; setLock(null); return true; };
 tools.locked = () => !!st.lock;
+/* ------------------------------------------------------------------ mark tool: draw features in photos */
+const KIND_HOW = {
+  point: 'click the point',
+  line: 'drag from the object’s LEFT end to its RIGHT end (its own left/right)',
+  axis: 'drag from the TAIL (back) to the NOSE (front)',
+};
+const activeFeature = () => idx.feat.get(st.feature) || null;
+tools.activeFeature = activeFeature;
+tools.setFeature = id => {
+  st.feature = id;
+  st.markStart = null;
+  st.markDrag = null;
+  P3.emit('feature', id);
+  if (P3.ui && P3.ui.hint) P3.ui.hint();
+  vp.requestRender();
+};
+const imgN = e => { const l = vp.local(e); return vp.screenToImg(l.x, l.y); };
+function featureMarkedIn(f, img) {
+  const ends = f.kind === 'point' ? [f.a] : [f.a, f.b];
+  return ends.every(v => (img.pins || []).some(p => p.v === v));
+}
+function nextFeature(img) {
+  const list = P3.state.features;
+  if (!list.length) return null;
+  const i = list.findIndex(f => f.id === st.feature);
+  for (let k = 1; k <= list.length; k++) { const f = list[(i + k) % list.length]; if (!featureMarkedIn(f, img)) return f; }
+  return null;
+}
+function finishMark(f, a, b) {
+  const img = idx.c.get(vp.activeCam);
+  if (!img) return;
+  M.setPin(img, f.a, a.x, a.y);
+  if (f.kind !== 'point' && b) M.setPin(img, f.b, b.x, b.y);
+  st.markStart = null;
+  P3.history.commit('Mark ' + f.name);
+  P3.emit('marked', f.id);
+  const nf = nextFeature(img);
+  if (nf) tools.setFeature(nf.id);
+  else { tools.setFeature(f.id); P3.ui.toast('All features marked in this photo', 'ok', { label: 'Next photo  ]', fn: () => P3.actions.nextImage() }); }
+}
+tools.defs.mark = {
+  hint: () => {
+    const f = activeFeature();
+    if (!P3.state.features.length) return 'Mark tool: add features first in the Features panel (a Direction tail → nose, Lines across the object, Points)';
+    if (!vp.activeCam) return 'Mark tool: look through a photo (double-click a camera or a photo), then draw each feature';
+    if (!f) return 'Pick a feature in the Features panel to mark it in this photo';
+    if (st.markStart) return `${f.name}: now click the ${f.kind === 'axis' ? 'NOSE (front)' : 'RIGHT end'} · Esc = cancel`;
+    return `${f.name} (${{ point: 'point', line: 'line', axis: 'direction' }[f.kind]}): ${KIND_HOW[f.kind]} · wheel = zoom · drag marks to adjust`;
+  },
+  down(e) {
+    if (e.button !== 0 || !vp.activeCam || vp.alignMode || !vp.inView(e)) return false;
+    const f = activeFeature();
+    if (!f) { P3.ui.toast(P3.state.features.length ? 'Pick a feature in the Features panel first' : 'Add a feature in the Features panel first', 'error'); return true; }
+    const n = imgN(e);
+    if (f.kind === 'point') { finishMark(f, n); return true; }
+    if (st.markStart) { finishMark(f, st.markStart, n); return true; }
+    st.markDrag = { a: n, b: n, x: e.clientX, y: e.clientY, moved: false };
+    vp.requestRender();
+    return true;
+  },
+  drag(e) {
+    const d = st.markDrag;
+    if (!d) return;
+    d.b = imgN(e);
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) d.moved = true;
+    P3.photoview && P3.photoview.updateLoupe(e, true);
+    vp.requestRender();
+  },
+  up() {
+    const d = st.markDrag;
+    st.markDrag = null;
+    if (!d) return;
+    const f = activeFeature();
+    if (d.moved && f) finishMark(f, d.a, d.b);
+    else { st.markStart = d.a; P3.ui.hint(); }
+    vp.requestRender();
+  },
+  cancel() {
+    const had = !!(st.markStart || st.markDrag);
+    st.markStart = null;
+    st.markDrag = null;
+    vp.requestRender();
+    P3.ui.hint();
+    return had;
+  },
+};
+/** In-progress mark for the photo layer: {f, a, b} in normalised image coords. */
+tools.markPreview = () => {
+  if (tools.current !== 'mark') return null;
+  const f = activeFeature();
+  if (!f) return null;
+  if (st.markDrag) return { f, a: st.markDrag.a, b: st.markDrag.b };
+  if (st.markStart) return { f, a: st.markStart, b: st.hoverN || st.markStart };
+  return null;
+};
+tools.trackHover = e => { if (tools.current === 'mark' && st.markStart && vp.activeCam) { st.hoverN = imgN(e); vp.requestRender(); } };
+
 tools.matchVertex = () => (tools.current === 'match' ? st.matchVid : null);
 
 /* ------------------------------------------------------------------ public API */
@@ -386,6 +483,7 @@ tools.set = name => {
   clearHelpers();
   vp.hover = null;
   if (name === 'match') { const v = P3.sel.ids('v'); st.matchVid = v.length === 1 ? v[0] : null; }
+  if (name === 'mark' && !idx.feat.has(st.feature)) { const img = vp.activeCam && idx.c.get(vp.activeCam); const f = (img && P3.state.features.find(x => !featureMarkedIn(x, img))) || P3.state.features[0]; st.feature = f ? f.id : null; }
   vp.rebuild();
   vp.updateGizmo();
   P3.emit('tool', name);
@@ -442,11 +540,19 @@ tools.init = () => {
     else P3.sel.set(keys);
   });
 
-  el.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, gizmo: vp.gizmoActive() }; });
+  let owned = false;
+  el.addEventListener('pointerdown', e => {
+    const t = tools.tool();
+    owned = !!(t.down && !vp.gizmoActive() && t.down(e));
+    down = owned ? null : { x: e.clientX, y: e.clientY, gizmo: vp.gizmoActive() };
+  });
+  window.addEventListener('pointermove', e => { if (owned) { const t = tools.tool(); if (t.drag) t.drag(e); } });
+  window.addEventListener('pointerup', e => { if (owned) { owned = false; const t = tools.tool(); if (t.up) t.up(e); } });
   el.addEventListener('pointermove', e => {
     if (e.buttons || box) return;
     const t = tools.tool();
     if (t.hover) t.hover(e);
+    tools.trackHover(e);
   });
   el.addEventListener('pointerup', e => {
     if (!down) return;
@@ -471,6 +577,7 @@ tools.init = () => {
       if (st.lineStart && st.lineStart.kind === 'vertex' && !idx.v.has(st.lineStart.id)) st.lineStart.kind = 'plane';
       st.facePts.forEach(p => { if (p.kind === 'vertex' && !idx.v.has(p.id)) p.kind = 'plane'; });
       if (st.matchVid != null && !idx.v.has(st.matchVid)) st.matchVid = null;
+      if (st.feature != null && !idx.feat.has(st.feature)) st.feature = null;
       st.rays = st.rays.filter(r => idx.c.has(r.img));
       drawRays();
     }

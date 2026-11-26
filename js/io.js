@@ -109,7 +109,7 @@ io.importImages = async files => {
   const existing = S().images.length - added.length;
   P3.model.arrangeRing(added, { radius: +P3.settings.ringRadius || 6, height: +P3.settings.ringHeight || 0, startAngle: existing * 17 });
   P3.history.commit(`Import ${added.length} photo(s)`);
-  P3.ui.toast(`Imported ${added.length} photo(s)${exifCount ? ` · FOV from EXIF for ${exifCount}` : ''}. Position them with Arrange, the gizmo, Align, or pins + Solve.`, 'ok');
+  P3.ui.toast(`Imported ${added.length} photo(s)${exifCount ? ` · FOV from EXIF for ${exifCount}` : ''}. Next: mark a few lines in each photo and the cameras place themselves.`, 'ok', { label: 'Start marking', fn: () => P3.actions.startMarking() });
   if (!existing) P3.vp.frame();
 };
 
@@ -117,7 +117,7 @@ io.importImages = async files => {
 function cloudForFile() {
   const c = P3.cloud;
   return c ? {
-    name: c.name, visible: c.visible !== false,
+    name: c.name, visible: c.visible !== false, kind: c.kind || 'points',
     positions: Array.from(c.positions, n => Math.round(n * 1e5) / 1e5),
     colors: c.colors ? Array.from(c.colors, n => Math.round(n * 1000) / 1000) : null,
   } : null;
@@ -190,6 +190,7 @@ io.loadProject = async (obj, { markSaved = true } = {}) => {
   P3.cloud = obj.cloud && obj.cloud.positions ? {
     name: obj.cloud.name || 'cloud',
     visible: obj.cloud.visible !== false,
+    kind: obj.cloud.kind || 'points',
     positions: obj.cloud.positions instanceof Float32Array ? obj.cloud.positions : new Float32Array(obj.cloud.positions),
     colors: obj.cloud.colors ? (obj.cloud.colors instanceof Float32Array ? obj.cloud.colors : new Float32Array(obj.cloud.colors)) : null,
   } : null;
@@ -268,7 +269,7 @@ io.autosaveNow = async () => {
     }
     if (cloudDirty) {
       const c = P3.cloud;
-      await idb.set('cloud', c ? { name: c.name, visible: c.visible, positions: c.positions, colors: c.colors } : null);
+      await idb.set('cloud', c ? { name: c.name, visible: c.visible, kind: c.kind, positions: c.positions, colors: c.colors } : null);
       cloudDirty = false;
     }
     await idb.set('meta', {
@@ -337,25 +338,97 @@ function parseTextCloud(text) {
   return { positions: new Float32Array(pos), colors: hasColor && col.length === pos.length ? new Float32Array(col) : null };
 }
 
+/* ---------- Gaussian splats (3DGS .ply and antimatter15 .splat) shown as coloured points ---------- */
+const MAX_SPLAT_POINTS = 1500000;
+const SH_C0 = 0.28209479177387814;
+const sigmoid = x => 1 / (1 + Math.exp(-x));
+
+function plyHeader(buf) {
+  const bytes = new Uint8Array(buf, 0, Math.min(buf.byteLength, 65536));
+  const text = new TextDecoder().decode(bytes);
+  const end = text.indexOf('end_header');
+  if (end < 0) return null;
+  const headerLen = text.slice(0, end).length + 'end_header'.length + (text[end + 10] === '\r' ? 2 : 1);
+  const lines = text.slice(0, end).split(/\r?\n/);
+  const fmt = (lines.find(l => l.startsWith('format')) || '').split(/\s+/)[1];
+  let count = 0, inVertex = false;
+  const props = [];
+  for (const l of lines) {
+    const p = l.trim().split(/\s+/);
+    if (p[0] === 'element') { inVertex = p[1] === 'vertex'; if (inVertex) count = +p[2]; }
+    else if (p[0] === 'property' && inVertex && p[1] !== 'list') props.push({ type: p[1], name: p[2] });
+  }
+  return { fmt, count, props, headerLen };
+}
+const PLY_SIZE = { char: 1, uchar: 1, int8: 1, uint8: 1, short: 2, ushort: 2, int16: 2, uint16: 2, int: 4, uint: 4, int32: 4, uint32: 4, float: 4, float32: 4, double: 8, float64: 8 };
+function isSplatPly(h) { return h && h.props.some(p => p.name === 'f_dc_0') && h.props.some(p => p.name === 'opacity'); }
+
+function parseSplatPly(buf, h) {
+  if (h.fmt !== 'binary_little_endian') throw new Error('Only binary little-endian splat .ply files are supported');
+  const dv = new DataView(buf);
+  let stride = 0;
+  const off = {};
+  for (const p of h.props) { off[p.name] = { o: stride, t: p.type }; stride += PLY_SIZE[p.type] || 4; }
+  const rd = (base, name) => {
+    const q = off[name]; if (!q) return 0;
+    const o = base + q.o;
+    switch (q.t) { case 'double': case 'float64': return dv.getFloat64(o, true); case 'uchar': case 'uint8': return dv.getUint8(o); default: return dv.getFloat32(o, true); }
+  };
+  const step = Math.max(1, Math.ceil(h.count / MAX_SPLAT_POINTS));
+  const pos = [], col = [];
+  for (let i = 0; i < h.count; i += step) {
+    const b = h.headerLen + i * stride;
+    if (b + stride > buf.byteLength) break;
+    if (sigmoid(rd(b, 'opacity')) < 0.12) continue;
+    pos.push(rd(b, 'x'), rd(b, 'y'), rd(b, 'z'));
+    col.push(...['f_dc_0', 'f_dc_1', 'f_dc_2'].map(n => U.clamp(0.5 + SH_C0 * rd(b, n), 0, 1)));
+  }
+  return { positions: new Float32Array(pos), colors: new Float32Array(col) };
+}
+function parseDotSplat(buf) {
+  const n = Math.floor(buf.byteLength / 32);
+  const dv = new DataView(buf);
+  const step = Math.max(1, Math.ceil(n / MAX_SPLAT_POINTS));
+  const pos = [], col = [];
+  for (let i = 0; i < n; i += step) {
+    const o = i * 32;
+    if (dv.getUint8(o + 27) < 30) continue;
+    pos.push(dv.getFloat32(o, true), dv.getFloat32(o + 4, true), dv.getFloat32(o + 8, true));
+    col.push(dv.getUint8(o + 24) / 255, dv.getUint8(o + 25) / 255, dv.getUint8(o + 26) / 255);
+  }
+  return { positions: new Float32Array(pos), colors: new Float32Array(col) };
+}
+
 io.importCloud = async file => {
   try {
     P3.ui.progress('Reading ' + file.name, 0.3);
     await U.nextFrame();
-    let positions, colors = null;
-    if (U.ext(file.name) === 'ply') {
-      const geo = new T.PLYLoader().parse(await U.readFile(file, 'buffer'));
-      positions = new Float32Array(geo.attributes.position.array);
-      if (geo.attributes.color) colors = new Float32Array(geo.attributes.color.array);
+    let positions, colors = null, kind = 'points';
+    const ext = U.ext(file.name);
+    if (ext === 'splat') {
+      ({ positions, colors } = parseDotSplat(await U.readFile(file, 'buffer')));
+      kind = 'splat';
+    } else if (ext === 'ply') {
+      const buf = await U.readFile(file, 'buffer');
+      const h = plyHeader(buf);
+      if (isSplatPly(h)) { ({ positions, colors } = parseSplatPly(buf, h)); kind = 'splat'; }
+      else {
+        const geo = new T.PLYLoader().parse(buf);
+        positions = new Float32Array(geo.attributes.position.array);
+        if (geo.attributes.color) colors = new Float32Array(geo.attributes.color.array);
+      }
+    } else if (ext === 'ksplat' || ext === 'spz' || ext === 'sog') {
+      throw new Error(`.${ext} is a compressed splat format — export it as .ply or .splat from your splat tool`);
     } else {
       ({ positions, colors } = parseTextCloud(await U.readFile(file, 'text')));
     }
     if (!positions.length) throw new Error('No points found');
-    P3.cloud = { name: file.name, positions, colors, visible: true };
-    S().cloudScale = 1;
+    P3.cloud = { name: file.name, positions, colors, visible: true, kind };
+    S().cloudMatrix = null;
     P3.emit('cloud');
     P3.vp.frame();
     io.markCloudDirty();
-    P3.ui.toast(`Loaded ${(positions.length / 3).toLocaleString()} points from ${file.name}`, 'ok');
+    P3.ui.toast(`Loaded ${(positions.length / 3).toLocaleString()} ${kind === 'splat' ? 'splat centres (shown as coloured points)' : 'points'} from ${file.name}`, 'ok');
   } catch (err) {
     console.error(err);
     P3.ui.toast('Could not load point cloud: ' + err.message, 'error');
@@ -403,7 +476,121 @@ io.importOBJ = async file => {
   }
 };
 
+/* ================================================================== COLMAP text model (automatic camera placement)
+   Run your photos through COLMAP (or anything that writes its text format), then import
+   cameras.txt + images.txt (+ points3D.txt). Photos are matched by file name. */
+const FY_MODELS = new Set(['PINHOLE', 'OPENCV', 'OPENCV_FISHEYE', 'FULL_OPENCV', 'FOV', 'THIN_PRISM_FISHEYE']);
+const baseName = n => String(n).split(/[\\/]/).pop().replace(/\.[^.]+$/, '').toLowerCase();
+
+io.importColmap = async files => {
+  const list = [...files];
+  const find = n => list.find(f => f.name.toLowerCase() === n);
+  const camF = find('cameras.txt'), imgF = find('images.txt'), ptF = find('points3d.txt');
+  try {
+    if (!imgF) throw new Error('images.txt is required (select cameras.txt, images.txt and points3D.txt together)');
+    if (!S().images.length) throw new Error('Import the same photos first — cameras are matched to photos by file name');
+    P3.ui.progress('Reading COLMAP model…', 0.2);
+    await U.nextFrame();
+    const intr = new Map();
+    if (camF) {
+      for (const line of (await U.readFile(camF, 'text')).split(/\r?\n/)) {
+        const p = line.trim().split(/\s+/);
+        if (!p[0] || p[0].startsWith('#') || p.length < 5) continue;
+        const fx = +p[4], fy = FY_MODELS.has(p[1]) ? +p[5] : fx;
+        intr.set(p[0], { w: +p[2], h: +p[3], fy });
+      }
+    }
+    const byName = new Map(S().images.map(img => [baseName(img.name), img]));
+    const lines = (await U.readFile(imgF, 'text')).split(/\r?\n/).filter(l => !l.startsWith('#'));
+    const matched = [], missing = [];
+    const flip = new T.Quaternion(1, 0, 0, 0); // 180° about X: COLMAP (y down, z forward) → three.js (y up, z back)
+    for (let i = 0; i < lines.length; i += 2) {
+      const p = lines[i].trim().split(/\s+/);
+      if (p.length < 10) { if (lines[i].trim()) i--; continue; }
+      const [qw, qx, qy, qz, tx, ty, tz] = p.slice(1, 8).map(Number);
+      const name = p.slice(9).join(' ');
+      const img = byName.get(baseName(name));
+      if (!img) { missing.push(name); continue; }
+      const qwc = new T.Quaternion(qx, qy, qz, qw).normalize();
+      const qcw = qwc.clone().invert();
+      const C = new T.Vector3(tx, ty, tz).applyQuaternion(qcw).negate();
+      P3.cam.setPose(img, C, qcw.multiply(flip));
+      const k = intr.get(p[8]);
+      if (k && k.fy > 0) { img.fov = U.round(2 * Math.atan(k.h / (2 * k.fy)) * U.R2D, 3); img.fovSource = 'colmap'; }
+      matched.push(img);
+    }
+    if (!matched.length) throw new Error('No COLMAP image names matched your photos' + (missing.length ? ` (e.g. “${missing[0]}”)` : ''));
+    if (ptF) {
+      const pos = [], col = [];
+      for (const line of (await U.readFile(ptF, 'text')).split(/\r?\n/)) {
+        const p = line.trim().split(/\s+/);
+        if (!p[0] || p[0].startsWith('#') || p.length < 7) continue;
+        pos.push(+p[1], +p[2], +p[3]);
+        col.push(+p[4] / 255, +p[5] / 255, +p[6] / 255);
+      }
+      if (pos.length) { P3.cloud = { name: 'COLMAP points3D', positions: new Float32Array(pos), colors: new Float32Array(col), visible: true, kind: 'points' }; S().cloudMatrix = null; cloudDirty = true; }
+    }
+    // Level the scene: average camera "up" → +Y, centre on the cameras' look-at area.
+    const up = matched.reduce((a, img) => a.add(new T.Vector3(0, 1, 0).applyQuaternion(P3.cam.quat(img))), new T.Vector3()).normalize();
+    const centre = P3.cloud && P3.cloud.name === 'COLMAP points3D'
+      ? new T.Box3().setFromBufferAttribute(new T.BufferAttribute(P3.cloud.positions, 3)).getCenter(new T.Vector3())
+      : matched.reduce((a, img) => a.add(P3.cam.position(img)), new T.Vector3()).divideScalar(matched.length);
+    const rot = new T.Matrix4().makeRotationFromQuaternion(new T.Quaternion().setFromUnitVectors(up, new T.Vector3(0, 1, 0)));
+    const m = rot.multiply(new T.Matrix4().makeTranslation(-centre.x, -centre.y, -centre.z));
+    const keepCloud = S().cloudMatrix;
+    P3.model.transformScene(m);
+    if (!P3.cloud) S().cloudMatrix = keepCloud;
+    // Marked features: rebuild them from the COLMAP cameras, then put the object along the reference direction.
+    let aligned = false;
+    if (S().features.length) {
+      P3.reindex();
+      P3.solve.triangulateFeatures();
+      if (S().features.some(f => f.kind === 'axis' && f.solved)) aligned = !P3.solve.alignToReference().error;
+    }
+    P3.history.commit('Import COLMAP');
+    if (aligned) P3.ui.toast('Features re-triangulated and the scene aligned to the reference direction', 'ok');
+    P3.emit('cloud');
+    io.markCloudDirty();
+    P3.vp.frame();
+    P3.ui.toast(`Placed ${matched.length} of ${S().images.length} photo cameras from COLMAP${missing.length ? ` · ${missing.length} name(s) not found` : ''}. Use “Align to reference direction” to put the object along +X.`, 'ok');
+  } catch (err) {
+    console.error(err);
+    P3.ui.toast('COLMAP import failed: ' + err.message, 'error');
+  } finally {
+    P3.ui.progress(null);
+  }
+};
+
+/* ================================================================== feature sets (reuse definitions across objects / "cousins") */
+io.exportFeatureSet = () => {
+  if (!S().features.length) return P3.ui.toast('No features to save yet', 'error');
+  const data = {
+    format: FORMAT + '-features', version: 1,
+    features: S().features.map(f => ({ name: f.name, kind: f.kind, color: f.color, ref: !!f.ref, length: f.length || null })),
+  };
+  U.download(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), U.safeName(P3.project.name) + '.features.json');
+  P3.ui.toast('Feature set saved — load it into another project to mark the same features', 'ok');
+};
+io.importFeatureSet = async file => {
+  try {
+    const obj = JSON.parse(await U.readFile(file, 'text'));
+    if (!obj || !Array.isArray(obj.features)) throw new Error('Not a feature set file');
+    let n = 0;
+    for (const f of obj.features) {
+      if (!['point', 'line', 'axis'].includes(f.kind) || S().features.some(x => x.name === f.name)) continue;
+      const nf = P3.model.addFeature(f.kind, f.name, { color: f.color, length: f.length });
+      if (f.ref) { S().features.forEach(x => { x.ref = false; }); nf.ref = true; }
+      n++;
+    }
+    P3.history.commit('Load feature set');
+    P3.ui.toast(`Added ${n} feature(s) from ${file.name}`, 'ok');
+  } catch (err) {
+    P3.ui.toast('Could not load feature set: ' + err.message, 'error');
+  }
+};
+
 /* ================================================================== exports */
+const exportable = v => !idx.unsolved.has(v);
 function faceBoundaryKeys() {
   const keys = new Set();
   for (const f of S().faces) for (let i = 0; i < f.v.length; i++) keys.add(P3.edgeKey(f.v[i], f.v[(i + 1) % f.v.length]));
@@ -415,10 +602,12 @@ function exportOBJ() {
   const s = S();
   const out = [`# ${FORMAT} ${P3.VERSION} export — ${P3.project.name}`, `# ${new Date().toISOString()}`, `# units: ${P3.settings.units}`, `# ${s.vertices.length} vertices, ${s.faces.length} faces, ${s.edges.length} edges`];
   const vi = new Map();
-  s.vertices.forEach((v, i) => { vi.set(v.id, i + 1); out.push(`v ${n6(v.p[0])} ${n6(v.p[1])} ${n6(v.p[2])}`); });
+  s.vertices.filter(v => exportable(v.id)).forEach((v, i) => { vi.set(v.id, i + 1); out.push(`v ${n6(v.p[0])} ${n6(v.p[1])} ${n6(v.p[2])}`); });
   const boundary = faceBoundaryKeys();
   const usedF = new Set(), usedE = new Set();
   const writeGroup = (name, faces, edges) => {
+    faces = faces.filter(f => f.v.every(v => vi.has(v)));
+    edges = edges.filter(e => vi.has(e.a) && vi.has(e.b));
     const lines = edges.filter(e => !boundary.has(P3.edgeKey(e.a, e.b)));
     faces.forEach(f => usedF.add(f.id));
     edges.forEach(e => usedE.add(e.id));
@@ -437,6 +626,7 @@ function exportSTL() {
   const out = [`solid ${name}`];
   const ab = new T.Vector3(), ac = new T.Vector3();
   for (const f of S().faces) {
+    if (!f.v.every(exportable)) continue;
     const pts = f.v.map(id => P3.model.vpos(id));
     if (pts.some(p => !p)) continue;
     for (const [i, j, k] of P3.geom.triangulate(pts)) {
@@ -451,7 +641,7 @@ function exportSTL() {
 }
 
 function exportPLY() {
-  const vs = S().vertices;
+  const vs = S().vertices.filter(v => exportable(v.id));
   const out = ['ply', 'format ascii 1.0', `comment ${FORMAT} points (${P3.settings.units})`, `element vertex ${vs.length}`, 'property float x', 'property float y', 'property float z', 'end_header'];
   vs.forEach(v => out.push(v.p.map(n6).join(' ')));
   return out.join('\n') + '\n';
@@ -486,8 +676,8 @@ async function exportGLB() {
     if (!buckets.has(k)) buckets.set(k, { name: o ? o.name : 'ungrouped', color: o ? o.color : P3.settings.faceColor, line: o ? o.color : P3.settings.lineColor, faces: [], edges: [] });
     return buckets.get(k);
   };
-  s.faces.forEach(f => bucket(idx.faceObj.get(f.id)).faces.push(f));
-  s.edges.forEach(e => { if (!boundary.has(P3.edgeKey(e.a, e.b))) bucket(idx.edgeObj.get(e.id)).edges.push(e); });
+  s.faces.forEach(f => { if (f.v.every(exportable)) bucket(idx.faceObj.get(f.id)).faces.push(f); });
+  s.edges.forEach(e => { if (!exportable(e.a) || !exportable(e.b)) return; if (!boundary.has(P3.edgeKey(e.a, e.b))) bucket(idx.edgeObj.get(e.id)).edges.push(e); });
   for (const b of buckets.values()) {
     const g = new T.Group();
     g.name = b.name;
@@ -557,8 +747,10 @@ io._exporters = { exportOBJ, exportSTL, exportPLY, exportCameras, exportGLB, rea
 io.routeFiles = async files => {
   const list = [...files];
   const images = list.filter(isImage);
-  const project = list.find(f => /\.json$/i.test(f.name));
-  const clouds = list.filter(f => /\.(ply|xyz|txt|csv|pts)$/i.test(f.name));
+  const colmap = list.filter(f => /^(cameras|images|points3d)\.txt$/i.test(f.name));
+  const featureSets = list.filter(f => /\.features\.json$/i.test(f.name));
+  const project = list.find(f => /\.json$/i.test(f.name) && !/\.features\.json$/i.test(f.name));
+  const clouds = list.filter(f => /\.(ply|xyz|txt|csv|pts|splat|ksplat|spz)$/i.test(f.name) && !colmap.includes(f));
   const objs = list.filter(f => /\.obj$/i.test(f.name));
   if (project) {
     if ((S().vertices.length || S().images.length) && P3.history.dirty) {
@@ -569,7 +761,9 @@ io.routeFiles = async files => {
   if (images.length) await io.importImages(images);
   for (const c of clouds) await io.importCloud(c);
   for (const o of objs) await io.importOBJ(o);
-  if (!project && !images.length && !clouds.length && !objs.length) P3.ui.toast('Unsupported file type', 'error');
+  if (colmap.length) await io.importColmap(colmap);
+  for (const fs of featureSets) await io.importFeatureSet(fs);
+  if (!project && !images.length && !clouds.length && !objs.length && !colmap.length && !featureSets.length) P3.ui.toast('Unsupported file type', 'error');
 };
 
 P3.on('history', () => io.scheduleAutosave());

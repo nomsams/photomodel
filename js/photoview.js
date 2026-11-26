@@ -42,22 +42,55 @@ function renderPins() {
   const img = activeImage();
   if (!img || !P3.settings.showPins) { svg.classList.add('hidden'); svg.innerHTML = ''; return; }
   svg.classList.remove('hidden');
-  svg.classList.toggle('interactive', ['match', 'select', 'triangulate'].includes(P3.tools.current));
+  svg.classList.toggle('interactive', ['match', 'select', 'triangulate', 'mark'].includes(P3.tools.current));
   const matchVid = P3.tools.matchVertex ? P3.tools.matchVertex() : null;
+  const active = P3.tools.activeFeature ? P3.tools.activeFeature() : null;
+  const pinOf = new Map((img.pins || []).map(p => [p.v, p]));
+  const f2 = n => n.toFixed(1);
   let out = '';
+  // feature lines / directions between their two marks
+  const arrow = (P, Q, color, cls = '') => {
+    const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, s = 11;
+    return `<path class="${cls}" d="M${f2(Q.x)} ${f2(Q.y)} L${f2(Q.x - ux * s - uy * s * 0.55)} ${f2(Q.y - uy * s + ux * s * 0.55)} L${f2(Q.x - ux * s + uy * s * 0.55)} ${f2(Q.y - uy * s - ux * s * 0.55)} Z" fill="${color}"/>`;
+  };
+  for (const f of P3.state.features) {
+    if (f.kind === 'point') continue;
+    const pa = pinOf.get(f.a), pb = pinOf.get(f.b);
+    if (!pa || !pb) continue;
+    const P = vp.imgToScreen(pa.x, pa.y), Q = vp.imgToScreen(pb.x, pb.y);
+    const w = active && active.id === f.id ? 3.2 : 2.2;
+    out += `<line x1="${f2(P.x)}" y1="${f2(P.y)}" x2="${f2(Q.x)}" y2="${f2(Q.y)}" stroke="rgba(0,0,0,.55)" stroke-width="${w + 2.5}" stroke-linecap="round"/>`;
+    out += `<line x1="${f2(P.x)}" y1="${f2(P.y)}" x2="${f2(Q.x)}" y2="${f2(Q.y)}" stroke="${f.color}" stroke-width="${w}" stroke-linecap="round"/>`;
+    if (f.kind === 'axis') out += arrow(P, Q, f.color);
+    const mx = (P.x + Q.x) / 2, my = (P.y + Q.y) / 2;
+    out += `<text x="${f2(mx + 8)}" y="${f2(my - 8)}" style="fill:${f.color}">${U.esc(f.name)}</text>`;
+  }
   for (const pin of img.pins || []) {
     const X = P3.model.vpos(pin.v);
     if (!X) continue;
     const P = vp.imgToScreen(pin.x, pin.y);
-    const Q = vp.toScreen(X);
-    const err = P3.solve.pinError(img, pin);
+    const fo = idx.featOf.get(pin.v);
+    const unsolved = idx.unsolved.has(pin.v);
+    const Q = unsolved ? null : vp.toScreen(X);
+    const err = unsolved ? null : P3.solve.pinError(img, pin);
     const cls = P3.solve.errorClass(err);
-    if (Q) out += `<line class="res ${cls}" x1="${P.x.toFixed(1)}" y1="${P.y.toFixed(1)}" x2="${Q.x.toFixed(1)}" y2="${Q.y.toFixed(1)}"/>`;
+    if (Q) out += `<line class="res ${cls}" x1="${f2(P.x)}" y1="${f2(P.y)}" x2="${f2(Q.x)}" y2="${f2(Q.y)}"/>`;
     const isSel = P3.sel.has('v', pin.v);
-    out += `<g class="pin${pin.v === matchVid ? ' active' : ''}${isSel ? ' sel' : ''}" data-v="${pin.v}" transform="translate(${P.x.toFixed(1)} ${P.y.toFixed(1)})">
-      <circle class="pin-hit" r="11"><title>Point #${pin.v} — error ${err == null || !isFinite(err) ? '—' : err.toFixed(1) + ' px'}. Drag to move, right-click to remove.</title></circle>
-      <circle class="pin-ring" r="6"/><path class="pin-cross" d="M-3 0H3M0 -3V3"/>
-      <text x="9" y="-8">${pin.v}</text></g>`;
+    const label = fo ? (fo.f.kind === 'point' ? U.esc(fo.f.name) : fo.f.kind === 'axis' ? (fo.end === 'a' ? 'tail' : 'nose') : (fo.end === 'a' ? 'L' : 'R')) : pin.v;
+    const ring = fo ? ` style="stroke:${fo.f.color}"` : '';
+    const what = fo ? `${U.esc(fo.f.name)} (${label})` : `Point #${pin.v}`;
+    out += `<g class="pin${pin.v === matchVid ? ' active' : ''}${isSel ? ' sel' : ''}" data-v="${pin.v}" transform="translate(${f2(P.x)} ${f2(P.y)})">
+      <circle class="pin-hit" r="11"><title>${what} — ${err == null ? (unsolved ? 'not solved yet' : '—') : !isFinite(err) ? 'behind camera' : 'error ' + err.toFixed(1) + ' px'}. Drag to move, right-click to remove.</title></circle>
+      <circle class="pin-ring" r="6"${ring}/><path class="pin-cross" d="M-3 0H3M0 -3V3"/>
+      <text x="9" y="-8">${label}</text></g>`;
+  }
+  // mark being drawn
+  const pr = P3.tools.markPreview ? P3.tools.markPreview() : null;
+  if (pr) {
+    const P = vp.imgToScreen(pr.a.x, pr.a.y), Q = vp.imgToScreen(pr.b.x, pr.b.y);
+    out += `<line x1="${f2(P.x)}" y1="${f2(P.y)}" x2="${f2(Q.x)}" y2="${f2(Q.y)}" stroke="${pr.f.color}" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>`;
+    out += `<circle cx="${f2(P.x)}" cy="${f2(P.y)}" r="5" fill="${pr.f.color}"/>`;
+    if (pr.f.kind === 'axis') out += arrow(P, Q, pr.f.color);
   }
   if (matchVid != null) {
     const X = P3.model.vpos(matchVid);
@@ -91,7 +124,7 @@ function onPinUp() {
   const d = drag;
   drag = null;
   pv.hideLoupe();
-  if (d.moved) P3.history.commit('Move pin');
+  if (d.moved) { P3.history.commit('Move pin'); P3.emit('marked'); }
   else P3.sel.set(['v:' + d.vid]);
 }
 function onPinContext(e) {
@@ -102,6 +135,7 @@ function onPinContext(e) {
   e.stopPropagation();
   P3.model.removePin(img, +g.dataset.v);
   P3.history.commit('Remove pin');
+  P3.emit('marked');
   P3.ui.toast(`Removed pin for point #${g.dataset.v}`, '', { label: 'Undo', fn: () => P3.actions.undo() });
 }
 pv.dragging = () => !!drag;
@@ -113,7 +147,7 @@ pv.updateLoupe = (e, force = false) => {
   const img = activeImage();
   const rec = img && P3.images.get(img.id);
   const tool = P3.tools.current;
-  const want = force || ['triangulate', 'match', 'point', 'line', 'face'].includes(tool);
+  const want = force || ['triangulate', 'match', 'point', 'line', 'face', 'mark'].includes(tool);
   if (!rec || !want || !P3.settings.showLoupe || vp.alignMode || vp.overlayHidden || !vp.inView(e)) { pv.hideLoupe(); return; }
   const l = vp.local(e);
   const n = vp.screenToImg(l.x, l.y);

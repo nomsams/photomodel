@@ -465,17 +465,118 @@ A.selectObject = (id, add) => {
   const keys = [...o.faces.map(i => 'f:' + i), ...o.edges.map(i => 'e:' + i)];
   if (add) P3.sel.add(keys); else P3.sel.set(keys);
 };
-A.clearCloud = () => { P3.cloud = null; S().cloudScale = 1; P3.emit('cloud'); P3.io.markCloudDirty(); updateCounts(); };
+A.clearCloud = () => { P3.cloud = null; S().cloudMatrix = null; P3.emit('cloud'); P3.io.markCloudDirty(); updateCounts(); };
 A.toggleCloud = () => { if (!P3.cloud) return; P3.cloud.visible = P3.cloud.visible === false; P3.emit('cloud'); P3.io.markCloudDirty(); };
 A.cloudToPoints = async () => {
   const c = P3.cloud;
   if (!c) return;
-  const n = c.positions.length / 3, k = S().cloudScale || 1;
+  const n = c.positions.length / 3, cm = P3.cloudMatrix();
   const step = Math.max(1, Math.ceil(n / 5000));
   if (!(await ui.confirm('Convert point cloud to points?', `This adds ${Math.ceil(n / step).toLocaleString()} editable points${step > 1 ? ` (every ${step}th point)` : ''} to the model.`, 'Convert'))) return;
-  for (let i = 0; i < n; i += step) M.addVertex(new T.Vector3(c.positions[i * 3] * k, c.positions[i * 3 + 1] * k, c.positions[i * 3 + 2] * k));
+  for (let i = 0; i < n; i += step) M.addVertex(new T.Vector3(c.positions[i * 3], c.positions[i * 3 + 1], c.positions[i * 3 + 2]).applyMatrix4(cm));
   commit('Cloud to points');
 };
+/* ---------- features: named points / lines / directions marked in every photo ---------- */
+const KIND_LABEL = { axis: 'direction', line: 'line', point: 'point' };
+const KIND_ICON = { axis: 'axis', line: 'span', point: 'dot' };
+A.importSplat = () => $('#fileSplat').click();
+A.importColmap = () => { ui.toast('Select cameras.txt, images.txt and points3D.txt together'); $('#fileColmap').click(); };
+A.importFeatureSet = () => $('#fileFeatures').click();
+A.exportFeatureSet = () => P3.io.exportFeatureSet();
+A.addFeature = async kind => {
+  kind = ['axis', 'line', 'point'].includes(kind) ? kind : 'line';
+  const n = S().features.filter(f => f.kind === kind).length + 1;
+  const defaults = { axis: n === 1 ? 'Tail → nose' : 'Direction ' + n, line: n === 1 ? 'Wingspan' : 'Line ' + n, point: 'Point ' + n };
+  const notes = {
+    axis: 'A <b>direction</b> says where the object points. Draw it in every photo from the <b>tail (back)</b> to the <b>nose (front)</b>. The first direction becomes the reference: after solving, the object faces +X.',
+    line: 'A <b>line</b> is a measurable span, e.g. a wingspan or the rear wings. Always draw it from the object’s own <b>left end to its right end</b>, so it means the same thing in every photo.',
+    point: 'A <b>point</b> is one recognisable spot, e.g. the top of the tail fin. Points off the main plane help the solver a lot.',
+  };
+  const v = await ui.form('Add ' + KIND_LABEL[kind], [
+    { key: 'name', label: 'Name', type: 'text', value: defaults[kind] },
+    ...(kind !== 'point' ? [{ key: 'length', label: `Real length (${P3.settings.units}, optional)`, type: 'number', value: '', step: 0.01 }] : []),
+  ], 'Add', notes[kind]);
+  if (!v) return;
+  const f = M.addFeature(kind, (v.name || '').trim() || defaults[kind], { length: v.length > 0 ? v.length : null });
+  commit('Add feature');
+  P3.tools.setFeature(f.id);
+  if (S().images.length) {
+    if (!vp.activeCam) vp.enterCamera(S().images[0].id);
+    P3.tools.set('mark');
+    P3.tools.setFeature(f.id);
+    ui.toast(`Now mark “${f.name}” in each photo — ${kind === 'point' ? 'click it' : 'drag across it'}, then press ] for the next photo`, 'ok');
+  } else ui.toast('Feature added — import photos, then mark it in each one', 'ok');
+};
+A.markFeature = id => {
+  P3.tools.setFeature(+id);
+  if (!vp.activeCam && S().images.length) vp.enterCamera(S().images[0].id);
+  P3.tools.set('mark');
+  P3.tools.setFeature(+id);
+};
+A.deleteFeature = async id => {
+  const f = idx.feat.get(+id);
+  if (!f) return;
+  M.removeFeature(f.id);
+  commitT('Delete feature');
+  undoToast(`Deleted feature “${f.name}” and its marks`);
+};
+A.setReference = id => {
+  const f = idx.feat.get(+id);
+  if (!f || f.kind !== 'axis') return;
+  S().features.forEach(x => { x.ref = x.id === f.id; });
+  commit('Set reference direction');
+  ui.toast(`“${f.name}” is now the reference direction (object faces +X)`);
+};
+A.featureLength = async id => {
+  const f = idx.feat.get(+id);
+  if (!f || f.kind === 'point') return;
+  const cur = f.solved ? M.vpos(f.a).distanceTo(M.vpos(f.b)) : null;
+  const v = await ui.form(`Real length of “${f.name}”`, [{ key: 'len', label: `Length (${P3.settings.units})`, type: 'number', value: f.length || (cur ? U.round(cur, 4) : ''), step: 0.01 }], 'Set',
+    f.solved ? 'The whole scene is scaled so this feature gets this length.' : 'Used to scale the result when you solve.');
+  if (!v || !(v.len > 0)) return;
+  f.length = v.len;
+  if (f.solved && cur > 1e-9) { M.scaleScene(v.len / cur); P3.emit('cloud'); }
+  commit('Set feature length');
+  ui.toast(`“${f.name}” = ${U.len(v.len)}`, 'ok');
+};
+A.solveFeatures = async (arg) => {
+  if (!S().features.length) return A.addFeatureHelp();
+  ui.progress('Solving cameras and shape from features…', 0.05);
+  await U.nextFrame();
+  let res;
+  try { res = P3.solve.fromFeatures({ solveFov: arg === 'fov', onProgress: p => ui.progress('Solving cameras and shape from features…', 0.1 + 0.9 * p) }); }
+  catch (err) { console.error(err); res = { error: 'Solver failed: ' + err.message }; }
+  ui.progress(null);
+  if (res.error) return ui.toast(res.error, 'error');
+  commitT('Solve from features');
+  P3.markview.status = { kind: 'solved', rms: res.rms, cams: res.cams, flat: res.flat, unused: res.unused };
+  P3.markview.update();
+  if (res.flat && res.rms > 1.5) ui.toast('All marked points lie in one plane — add a point that sticks out (e.g. the tail fin tip) and mark it for a reliable result', 'error');
+  const worst = res.perImg.slice().sort((a, b) => (b.rms || 0) - (a.rms || 0))[0];
+  const msg = `Solved ${res.cams} cameras and ${res.points} feature points — error ${res.rms.toFixed(2)} px` +
+    (worst && worst.rms > 8 ? ` · check “${worst.name}” (${worst.rms.toFixed(1)} px — a mark may be flipped or misplaced)` : '') +
+    (res.skipped.length ? ` · skipped ${res.skipped.length} photo(s) with < 4 marks` : '') +
+    (res.aligned ? '' : ' · add a Direction feature to orient the object');
+  undoToast(msg, res.rms < 8 ? 'ok' : 'error');
+  if (vp.activeCam) vp.refreshCamera(); else vp.frame();
+};
+A.startMarking = () => P3.markview.startMarking();
+A.addFeatureHelp = () => ui.toast('Add features first: Features → Add → Direction (tail → nose), then a Line across the object', 'error');
+A.triangulateFeatures = () => {
+  const n = P3.solve.triangulateFeatures();
+  if (!n) return ui.toast('Mark each feature in 2+ photos whose cameras are already placed', 'error');
+  commitT('Triangulate features');
+  undoToast(`Triangulated ${n} feature(s) with the cameras as they are`, 'ok');
+};
+A.alignReference = () => {
+  const r = P3.solve.alignToReference();
+  if (r.error) return ui.toast(r.error, 'error');
+  commitT('Align to reference direction');
+  P3.emit('cloud');
+  vp.frame();
+  undoToast('Scene aligned: reference direction along +X, object upright on the grid', 'ok');
+};
+
 A.tool = name => P3.tools.set(name);
 A.gizmo = m => vp.setGizmoMode(m);
 
@@ -506,6 +607,19 @@ const CMDS = [
   { g: 'Tools', l: 'Face tool', i: 'face', k: 'F', run: () => A.tool('face') },
   { g: 'Tools', l: 'Triangulate tool', i: 'tri', k: 'T', run: () => A.tool('triangulate') },
   { g: 'Tools', l: 'Pin tool (match points to photos)', i: 'pin', k: 'K', run: A.pinTool },
+  { g: 'Tools', l: 'Mark features in photos', i: 'feature', k: 'J', run: () => A.tool('mark') },
+  { g: 'Features', l: 'Start marking photos (solve cameras automatically)', i: 'feature', k: 'J', run: A.startMarking },
+  { g: 'Features', l: 'Add direction feature (tail → nose)', i: 'axis', run: () => A.addFeature('axis') },
+  { g: 'Features', l: 'Add line feature (left → right)', i: 'span', run: () => A.addFeature('line') },
+  { g: 'Features', l: 'Add point feature', i: 'dot', run: () => A.addFeature('point') },
+  { g: 'Features', l: 'Solve cameras + shape from features', i: 'solve', run: () => A.solveFeatures(), when: () => S().features.length > 0 },
+  { g: 'Features', l: 'Solve from features (also field of view)', i: 'solve', run: () => A.solveFeatures('fov'), when: () => S().features.length > 0 },
+  { g: 'Features', l: 'Triangulate features (keep cameras)', i: 'tri', run: A.triangulateFeatures, when: () => S().features.length > 0 },
+  { g: 'Features', l: 'Align scene to reference direction (+X)', i: 'axis', run: A.alignReference, when: () => S().features.some(f => f.kind === 'axis') },
+  { g: 'Features', l: 'Save feature set (reuse for similar objects)…', i: 'export', run: A.exportFeatureSet, when: () => S().features.length > 0 },
+  { g: 'Features', l: 'Load feature set…', i: 'import', run: A.importFeatureSet },
+  { g: 'File', l: 'Import Gaussian splat (.ply / .splat)…', i: 'sparkle', run: A.importSplat },
+  { g: 'File', l: 'Import COLMAP cameras + points…', i: 'camera', run: A.importColmap },
   { g: 'Model', l: 'Make face from selected points', i: 'face', k: 'Enter', run: A.makeFace, when: () => has.v() >= 3, ctx: true },
   { g: 'Model', l: 'Connect selected points', i: 'line', k: 'C', run: A.connect, when: () => has.v() >= 2, ctx: true },
   { g: 'Model', l: 'Merge selected points', k: 'M', run: A.merge, when: () => has.v() >= 2, ctx: true },
@@ -707,6 +821,56 @@ function renderObjectList() {
   }
 }
 
+/* ================================================================== features list */
+function renderFeatureList() {
+  const list = $('#featureList');
+  if (!list) return;
+  const feats = S().features;
+  $('#featCount').textContent = feats.length;
+  list.innerHTML = '';
+  if (!feats.length) {
+    list.append(h('div', { class: 'list-empty', html: 'Mark the same things in every photo and let the app place the cameras and build the shape.<br><br><b>1.</b> Add → <b>Direction</b> (tail → nose)<br><b>2.</b> Add → <b>Line</b> (e.g. wingspan, left → right)<br><b>3.</b> Draw them in each photo · <b>Solve</b>' }));
+    return;
+  }
+  const active = P3.tools.activeFeature && P3.tools.activeFeature();
+  const nImg = S().images.length;
+  for (const f of feats) {
+    const marks = M.featureMarks(f);
+    const len = f.kind !== 'point' && f.solved ? M.vpos(f.a).distanceTo(M.vpos(f.b)) : null;
+    const img = vp.activeCam && idx.c.get(vp.activeCam);
+    const here = img ? (f.kind === 'point' ? [f.a] : [f.a, f.b]).every(v => (img.pins || []).some(p => p.v === v)) : null;
+    const meta = `${KIND_LABEL[f.kind]} · ${marks}/${nImg} photos${here === true ? ' · ✓ here' : here === false ? ' · not marked here' : ''}${f.solved ? (len != null ? ' · ' + U.len(len, 3) : ' · solved') : ''}`;
+    const nameEl = h('div', { class: 'item-name', title: 'Double-click to rename' }, f.name, f.ref ? h('span', { class: 'feat-ref', title: 'Reference direction: the object faces +X after solving' }, '★') : null);
+    const item = h('div', { class: 'feat-item' + (active && active.id === f.id ? ' active' : '') },
+      h('div', { class: 'feat-swatch', style: `background:${f.color}` }, icon(KIND_ICON[f.kind])),
+      h('div', { class: 'item-main' }, nameEl, h('div', { class: 'item-meta' }, meta),
+        h('div', { class: 'feat-bar' }, h('i', { style: `width:${nImg ? Math.round((100 * marks) / nImg) : 0}%;background:${marks >= 2 ? 'var(--ok)' : 'var(--warn)'}` }))),
+      h('div', { class: 'item-actions' },
+        h('button', { title: 'Mark in photos', onclick: e => { e.stopPropagation(); A.markFeature(f.id); } }, icon('feature')),
+        f.kind === 'axis' ? h('button', { class: f.ref ? 'on' : '', title: 'Use as reference direction (object faces +X)', onclick: e => { e.stopPropagation(); A.setReference(f.id); } }, icon('target')) : null,
+        f.kind !== 'point' ? h('button', { title: 'Set real length', onclick: e => { e.stopPropagation(); A.featureLength(f.id); } }, icon('scale')) : null,
+        h('button', { class: 'danger', title: 'Delete feature and its marks', onclick: e => { e.stopPropagation(); A.deleteFeature(f.id); } }, icon('trash'))));
+    item.addEventListener('click', () => { if (vp.activeCam) A.markFeature(f.id); else P3.tools.setFeature(f.id); });
+    nameEl.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      const inp = h('input', { class: 'rename', value: f.name });
+      nameEl.replaceWith(inp);
+      inp.focus(); inp.select();
+      let finished = false;
+      const done = ok => { if (finished) return; finished = true; const v = inp.value.trim(); if (ok && v && v !== f.name) { f.name = v; commit('Rename feature'); } else renderFeatureList(); };
+      inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); ev.stopPropagation(); });
+      inp.addEventListener('blur', () => done(true));
+      inp.addEventListener('click', ev => ev.stopPropagation());
+    });
+    list.append(item);
+  }
+  const solvable = feats.length && S().images.filter(i => (i.pins || []).filter(p => idx.featOf.has(p.v)).length >= 4).length >= 2;
+  list.append(h('div', { class: 'p-buttons' },
+    h('button', { class: 'small primary', disabled: !solvable, title: solvable ? 'Place every camera and build the shape from the marks' : 'Needs 2+ photos with 4+ marked points (e.g. a direction + a line)', onclick: () => A.solveFeatures() }, icon('solve'), 'Solve cameras + shape'),
+    h('button', { class: 'small', title: 'Keep cameras where they are; just place the features', onclick: A.triangulateFeatures }, icon('tri'), 'Triangulate only'),
+    h('button', { class: 'small', title: 'Rotate/scale the whole scene so the reference direction lies along +X', onclick: A.alignReference }, icon('axis'), 'Align to reference')));
+}
+
 /* ================================================================== point cloud panel */
 function renderCloud() {
   const el = $('#cloudInfo');
@@ -719,7 +883,7 @@ function renderCloud() {
   }
   const n = c.positions.length / 3;
   el.append(
-    h('div', { class: 'p-info' }, h('b', {}, c.name), h('br'), `${n.toLocaleString()} points${c.colors ? ' · coloured' : ''}${(S().cloudScale || 1) !== 1 ? ` · scaled ×${U.round(S().cloudScale, 4)}` : ''}`),
+    h('div', { class: 'p-info' }, h('b', {}, c.name), h('br'), `${n.toLocaleString()} points${c.colors ? ' · coloured' : ''}${c.kind === 'splat' ? ' · Gaussian splat (centres)' : ''}${S().cloudMatrix ? ' · aligned to scene' : ''}`),
     h('div', { class: 's-row', style: 'grid-template-columns:1fr 130px;border:0' }, h('label', { class: 'muted' }, 'Point size'),
       h('div', { class: 'ctl' }, h('input', { type: 'range', min: 1, max: 10, step: 0.5, value: P3.settings.cloudPointSize, oninput: e => P3.setSetting('cloudPointSize', +e.target.value) }))),
     h('div', { class: 'p-buttons' },
@@ -1031,6 +1195,7 @@ function updateCounts() {
 }
 function renderAll() {
   renderImageList();
+  renderFeatureList();
   renderObjectList();
   renderCloud();
   renderProps(true);
@@ -1076,6 +1241,7 @@ const SETTINGS_SCHEMA = [
   { key: 'snapStep', label: 'Snap step', type: 'number', step: 0.05, min: 0.0001 },
   { key: 'snapEdges', label: 'Snap to lines & midpoints', type: 'check' },
   { key: 'stickToFace', label: 'Keep lines / faces on the face they start on', type: 'check' },
+  { key: 'autoSolve', label: 'Solve cameras automatically while marking', type: 'check' },
   { key: 'snapRadius', label: 'Snap / pick radius (px)', type: 'range', min: 4, max: 30, step: 1 },
   { group: 'Photos' },
   { key: 'useExifFov', label: 'Use EXIF focal length for FOV', type: 'check' },
@@ -1126,7 +1292,7 @@ function showSettings() {
 /* ================================================================== help */
 const SHORTCUTS = [
   ['V  P  L  F', 'Select · Point · Line · Face tools'],
-  ['T  K', 'Triangulate from photos · Pin points in photos'],
+  ['T  K  J', 'Triangulate from photos · Pin points in photos · Mark features'],
   ['W  E  R', 'Gizmo: move · rotate · scale'],
   ['Ctrl K  or  /', 'Command palette — every action'],
   ['Right-click', 'Context menu for the selection'],
@@ -1162,7 +1328,15 @@ function showHelp() {
       <li><b>Combine</b> faces and lines into named objects; extrude, mirror and duplicate to build faster.</li>
       <li><b>Scale</b> the scene from one line of known length, then <b>export</b> OBJ, GLB, STL, PLY or camera poses.</li>` }),
     h('p', { class: 'small', html: 'Not sure where to start? <a href="#" data-action="demo">Load the demo</a> — photo 4 is deliberately misplaced; open it and press <b>Solve</b>.' }),
-    h('p', { class: 'small', html: 'Automatic dense reconstruction is not done in the browser. If you have a point cloud from photogrammetry software (Meshroom, COLMAP, RealityScan…), load it via <b>Import → Point cloud</b> and snap to it.' }),
+    h('h3', {}, 'Features: place cameras automatically'),
+    h('ol', { html: `
+      <li>In <b>Features</b>, add a <b>Direction</b> (tail → nose) and one or more <b>Lines</b> (e.g. the wingspan, drawn left → right) and <b>Points</b> (e.g. the tail fin tip).</li>
+      <li>Open each photo and draw them with the <b>Mark</b> tool (<kbd>J</kbd>): drag across the feature; it moves on to the next one automatically. Drag the end marks to fix them.</li>
+      <li>Press <b>Solve</b>: every camera and the feature shape are fitted together (bundle adjustment). The object ends up facing +X, upright on the grid. Give a feature a real length to get real units.</li>
+      <li>Save the <b>feature set</b> to reuse the same definitions on a similar object.</li>` }),
+    h('p', { class: 'small', html: 'Each photo needs 4+ marked points (a direction + a line is 4). A point off the main plane — like a tail fin tip — makes the solve far more reliable.' }),
+    h('h3', {}, 'Point clouds & Gaussian splats'),
+    h('p', { class: 'small', html: 'Building dense point clouds or training Gaussian splats needs a GPU pipeline that can’t run in a web page. Use a dedicated tool and bring the result in:<br>• <b>COLMAP</b> (free): run it on the same photos, export the model as text, then <b>Import → COLMAP</b> — every camera is placed automatically and the sparse point cloud comes along.<br>• <b>Splats</b> from Postshot, Polycam, Luma, Kiri, etc.: <b>Import → Gaussian splat</b> (.ply / .splat) shows the splat centres as coloured points you can snap to.<br>• Any <b>point cloud</b> (.ply, .xyz…): <b>Import → Point cloud</b>.' }),
     h('h3', {}, 'Shortcuts'),
     h('div', { class: 'help-grid' }, SHORTCUTS.flatMap(([k, d]) => [h('div', {}, ...k.split(/\s{2,}|\s·\s/).flatMap((x, i) => [i ? ' ' : '', h('kbd', {}, x.trim())])), h('div', { class: 'muted' }, d)])));
   openModal({ title: 'Help & shortcuts', body, wide: true });
@@ -1213,6 +1387,8 @@ function onKey(e) {
     if (k === ',' || k === '.') { e.preventDefault(); A.nudge('roll', k === '.' ? 1 : -1, 0); return; }
   }
   if (e.altKey) return;
+  // marking mode: 1–9 pick a feature
+  if (P3.markview.active() && /^[1-9]$/.test(k)) { const f = S().features[+k - 1]; if (f) P3.tools.setFeature(f.id); e.preventDefault(); return; }
   const tools = P3.tools;
   switch (kl) {
     case 'v': tools.set('select'); break;
@@ -1221,6 +1397,7 @@ function onKey(e) {
     case 'f': tools.set('face'); break;
     case 't': tools.set('triangulate'); break;
     case 'k': A.pinTool(); break;
+    case 'j': A.startMarking(); break;
     case 'w': vp.setGizmoMode('translate'); break;
     case 'e': vp.setGizmoMode('rotate'); break;
     case 'r': vp.setGizmoMode('scale'); break;
@@ -1289,6 +1466,9 @@ function bind() {
   fileInput('#fileProject', files => P3.io.openFile(files[0]));
   fileInput('#fileCloud', files => P3.io.importCloud(files[0]));
   fileInput('#fileObj', files => P3.io.importOBJ(files[0]));
+  fileInput('#fileSplat', files => P3.io.importCloud(files[0]));
+  fileInput('#fileColmap', files => P3.io.importColmap(files));
+  fileInput('#fileFeatures', files => P3.io.importFeatureSet(files[0]));
 
   $('#projectName').addEventListener('change', e => { P3.project.name = e.target.value.trim() || 'Untitled project'; e.target.value = P3.project.name; P3.io.scheduleAutosave(); updateHistoryButtons(); });
 
@@ -1401,13 +1581,14 @@ function bind() {
   });
 
   P3.on('change', info => {
-    if (!info || !info.live) { renderImageList(); renderObjectList(); }
+    if (!info || !info.live) { renderImageList(); renderObjectList(); renderFeatureList(); }
     renderProps();
     updateBanner();
     updateCounts();
   });
   P3.on('selection', () => { renderProps(); renderImageList(); renderObjectList(); });
-  P3.on('view', () => { renderImageList(); renderProps(); updateBanner(); ui.hint(); });
+  P3.on('view', () => { renderImageList(); renderFeatureList(); renderProps(); updateBanner(); ui.hint(); });
+  P3.on('feature', () => renderFeatureList());
   P3.on('photozoom', () => { updateZoomBadge(); vp.updateGizmo(); });
   P3.on('history', updateHistoryButtons);
   P3.on('tool', () => { updateToolbar(); renderProps(true); ui.hint(); });
@@ -1427,6 +1608,7 @@ ui.init = async () => {
   }
   P3.photoview.init();
   P3.tools.init();
+  P3.markview.init();
   bind();
   initTooltips();
   P3.history.reset();
