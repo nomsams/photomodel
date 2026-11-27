@@ -184,6 +184,12 @@ io.loadProject = async (obj, { markSaved = true } = {}) => {
   P3.vp.clearTextures();
   const st = P3.normalizeState(obj.state);
   st.images = st.images.filter(i => P3.images.has(i.id));
+  let repaired = 0;
+  for (const img of st.images) {
+    const el = P3.images.get(img.id).el, w = el.naturalWidth, h = el.naturalHeight;
+    if (w && h && Math.abs(w / h - img.w / img.h) > 0.01) { img.w = w; img.h = h; img.placed = false; repaired++; }
+  }
+  if (repaired) setTimeout(() => P3.ui.toast(`Repaired the size of ${repaired} photo(s) that didn't match their picture — place the photos again`, 'error'), 400);
   P3.state = st;
   P3.project.name = obj.name || 'Untitled project';
   if (obj.settings && obj.settings.units) P3.setSetting('units', obj.settings.units);
@@ -256,16 +262,16 @@ const idb = {
   del: k => idb.run('readwrite', s => s.delete(k)),
   keys: () => idb.run('readonly', s => s.getAllKeys()),
 };
-const persisted = new Set();
+const persisted = new Map();
 let cloudDirty = true;
 
 io.autosaveNow = async () => {
   if (!P3.settings.autosave || io.loading || !window.indexedDB) return;
   try {
     for (const img of S().images) {
-      if (persisted.has(img.id)) continue;
+      if (persisted.get(img.id) === (P3.images.get(img.id) || {}).src) continue;
       const rec = P3.images.get(img.id);
-      if (rec) { await idb.set('img:' + img.id, rec.src); persisted.add(img.id); }
+      if (rec) { await idb.set('img:' + img.id, rec.src); persisted.set(img.id, rec.src); }
     }
     if (cloudDirty) {
       const c = P3.cloud;
@@ -304,7 +310,7 @@ io.restoreAutosave = async () => {
     io.loading = true;
     await io.loadProject(obj, { markSaved: !obj.dirty });
     persisted.clear();
-    Object.keys(obj.images || {}).forEach(id => persisted.add(+id));
+    Object.entries(obj.images || {}).forEach(([id, src]) => persisted.set(+id, src));
     cloudDirty = false;
     // drop photos that are no longer referenced
     const keep = new Set(Object.keys(obj.images || {}).map(id => 'img:' + id));

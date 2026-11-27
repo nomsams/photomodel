@@ -808,6 +808,11 @@ solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
   let res = out.res;
   if (solveFov) res = bundle(res.cams, res.pts, out.obs, { iters: 150, scale: out.scale, solveFov: true });
   const used = out.used;
+  let fovFitted = false;
+  if (!solveFov && res.rms > 2 && used.some(img => img.fovSource !== 'exif' && img.fovSource !== 'colmap')) {
+    const rf = bundle(res.cams, res.pts, res.obs || out.obs, { iters: 200, scale: out.scale, solveFov: true });
+    if (rf.cams.every(c => c.fov > 3 && c.fov < 110) && rf.rms < res.rms * 0.75) { res = rf; fovFitted = true; }
+  }
 
   const ups = res.cams.map(c => new T.Vector3(0, 1, 0).applyQuaternion(c.q));
   const m = referenceFrame(res.pts, ups) || autoFrame(res.pts, res.cams);
@@ -816,7 +821,7 @@ solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
   used.forEach((img, ci) => {
     const c = res.cams[ci];
     P3.cam.setPose(img, m ? c.pos.clone().applyMatrix4(m) : c.pos, m ? rq.clone().multiply(c.q) : c.q);
-    if (solveFov) img.fov = U.round(c.fov, 3);
+    if (solveFov || fovFitted) { img.fov = U.round(c.fov, 3); if (img.fovSource !== 'exif') img.fovSource = 'fitted'; }
     img.placed = true;
   });
   for (const [v, p] of res.pts) idx.v.get(v).p = (m ? p.clone().applyMatrix4(m) : p).toArray().map(n => U.round(n, 6));
@@ -837,6 +842,6 @@ solve.fromFeatures = ({ solveFov = false, onProgress, quick = false } = {}) => {
   const cov = [0, 1, 2].map(i => [0, 1, 2].map(j => P.reduce((a, p) => a + (p.getComponent(i) - cen.getComponent(i)) * (p.getComponent(j) - cen.getComponent(j)), 0)));
   const ev = jacobiEigen(cov).values;
   const flat = ev[0] > 0 && ev[2] / ev[0] < 0.002;
-  return { error: null, rms: res.rms, cams: used.length, points: res.pts.size, skipped: out.skipped, perImg, aligned: !!m, starts: out.starts, flat, flipped, unused: s.images.length - used.length };
+  return { error: null, rms: res.rms, cams: used.length, points: res.pts.size, skipped: out.skipped, perImg, aligned: !!m, starts: out.starts, flat, flipped, fovFitted, unused: s.images.length - used.length };
 };
 })();
